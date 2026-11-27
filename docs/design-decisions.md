@@ -20,12 +20,14 @@ The cost: nothing is a click. Each feature you add is a file that you or your ag
 
 **One flat LAN.** No VLANs, no guest or IoT network. A flat network is easy to reason about and needs no
 managed-switch setup. The cost: a compromised device can reach every other device. If you need separation,
-this repository is a start and not a finish.
+add VLANs: [features.md](features.md#not-in-the-example) names the files.
 
-**IPv4 only.** IPv6 is switched off in sysctl and dropped in nftables. Two address families mean two rule
-sets to get right, and a rule set that covers only one of them is worse than none.
+**IPv4 only in the example.** IPv6 is switched off in sysctl and dropped in nftables. Two address families
+mean two rule sets to get right, and a rule set that covers only one of them is worse than none. When you
+want IPv6, add it as a whole: the sysctl, the rules, the prefix and the announcements together.
 
-**DHCP on the WAN side only.** No PPPoE and no static WAN address.
+**DHCP on the WAN side.** The example house gets its address by DHCP. PPPoE and a fixed address are not
+set up; they are a change to the `wan0` part of two files.
 
 **No web interface.** The repository is the configuration, a deploy is the only way to change the box, and
 every change is in git twice (here, and `/etc` on the box).

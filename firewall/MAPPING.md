@@ -11,12 +11,12 @@ Your router's menu names differ. Paths are under `firewall/common/` unless they 
 
 | Router setting | Example | Here | Notes |
 |---|---|---|---|
-| Connection type | Automatic (DHCP) | `profiles/prod/etc/network/interfaces`: `iface wan0 inet dhcp` | PPPoE and static addresses are not supported |
+| Connection type | Automatic (DHCP) | `profiles/prod/etc/network/interfaces`: `iface wan0 inet dhcp` | PPPoE and static addresses are not set up in the example. Your agent can add them: see `docs/features.md`, "Not in the example" |
 | WAN MAC address | The old router's | `WAN_CLONE_MAC` in `site.env`; used in `interfaces` (prod) | Same MAC, same lease, same public address |
 | DHCP client ID, host name | MAC-based, no name | `profiles/prod/etc/dhcpcd.conf`: `clientid`, no `hostname` | Debian's default is a DUID; this tree changes it to match a router |
 | WAN DNS servers | The provider's, or a public one | `etc/unbound/unbound.conf.d/firewall.conf`, `forward-zone` | DNS over TLS to Quad9. The provider's resolvers are not used |
 | MTU | 1500 | Default | MSS is clamped to the path MTU in the `forward` chain |
-| IPv6 | Off | `etc/sysctl.d/`, and `nftables.conf` drops IPv6 | Not supported |
+| IPv6 | Off | `etc/sysctl.d/`, and `nftables.conf` drops IPv6 | Off in the example. Your agent can add it: see `docs/features.md`, "Not in the example" |
 | Second WAN, USB modem | None | None | |
 
 ## LAN, DHCP and DNS
@@ -38,7 +38,7 @@ Your router's menu names differ. Paths are under `firewall/common/` unless they 
 | Router setting | Example | Here |
 |---|---|---|
 | Wi-Fi names, passwords, bands | Two names | **Not here.** The old router, as an access point, keeps them |
-| Guest network on its own VLAN | Not used | Not supported: one flat LAN. Remove the guest network before the cutover, or accept that its clients join the LAN |
+| Guest network on its own VLAN | Not used | Not set up: the example has one flat LAN. Remove the guest network before the cutover, accept that its clients join the LAN, or have your agent add a VLAN for it |
 | IoT network bridged to the LAN | In use | Unchanged; it is the LAN |
 
 ## Port forwarding and NAT
@@ -88,7 +88,8 @@ Your router's menu names differ. Paths are under `firewall/common/` unless they 
 
 ## What has no counterpart
 
-Decide about each of these before the cutover, because it stops working:
+The example has nothing for these. Decide about each one before the cutover: have your agent build it
+(`docs/features.md`, "Not in the example"), move it to another device, or accept that it stops working.
 
 - Guest network isolation and VLANs.
 - Per-device parental controls, schedules and time limits.

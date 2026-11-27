@@ -11,7 +11,7 @@ What you need, how your own values stay apart from the shared files, and where t
 | A TPM 2.0 chip | Only for the stored mail password |
 | An admin PC | It builds the image (Linux, or WSL on Windows), holds the SSH key, and pulls the backups. The helper scripts in `firewall/tools/*.ps1` are written for Windows PowerShell and are untested elsewhere |
 | A switch and an access point | The firewall has no Wi-Fi. Your old router can become the access point |
-| An internet line that gives its address by DHCP | PPPoE and static addresses are not in this tree |
+| An internet line | The example gets its address by DHCP. For PPPoE or a fixed address your agent writes the `wan0` part ([features.md](features.md#not-in-the-example)) |
 | Time | An evening for stages 1 to 4, and 30 minutes without internet for the cutover |
 
 ## What is a setting and what is an edit

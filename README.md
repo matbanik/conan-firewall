@@ -74,7 +74,9 @@ an access point, and an evening. Details: [docs/before-you-start.md](docs/before
 
 - **It ships no image, ISO, binary or key.** You or your agent build the installer from stock Debian.
 - **It is one house's real configuration with example values, not a product.** Expect to read files.
-- **One flat LAN.** No VLANs, no VPN server, no IPv6. All [limits](docs/features.md#limits).
+- **Make it yours.** The example is one house: a single IPv4 LAN. VLANs, a VPN server, IPv6 and PPPoE are
+  not set up in it, and nothing blocks them. It is stock Debian, so tell your agent what you need and it
+  builds and tests it. See [what the example leaves out](docs/features.md#not-in-the-example).
 
 ## More
 

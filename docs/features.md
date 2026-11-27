@@ -9,7 +9,7 @@ Everything the firewall does, by area. For why each choice was made, read
 - **nftables** firewall, default drop on input and forward, NAT for one LAN.
 - **Port forwards only with a source address.** The example forwards a RustDesk server to one LAN host from one
   outside address, with a hairpin rule for LAN clients that use the public name.
-- **No UPnP, no SIP or H.323 helpers, no web interface, IPv6 off.**
+- **No UPnP, no SIP or H.323 helpers, no web interface.** IPv6 is off in the example.
 - **IP block lists** in nftables sets, updated every 6 hours: Spamhaus DROP, Feodo Tracker, Emerging Threats
   compromised hosts, DShield. Traffic from listed addresses is dropped before connection tracking. A LAN device
   that connects to a listed address is dropped and logged. A bad download never replaces the last good list.
@@ -87,11 +87,26 @@ Everything the firewall does, by area. For why each choice was made, read
 - `tools/render-site.py`: fills your values into a copy of the tree. `tools/scan-public.py`: stops a commit
   that holds a real address, MAC, email or key.
 
-## Limits
+## Not in the example
 
-- One flat LAN. No VLANs, no guest network, no VPN server, no IPv6.
+The example is one house's setup, and that house did not need the parts below. Nothing in the design blocks
+them. The box is stock Debian with nftables, so each one is a set of files that you or your agent add.
+
+| Not set up | Where it goes |
+|---|---|
+| VLANs, a guest or IoT network | VLAN interfaces on `trunk0` in `/etc/network/interfaces`, one DHCP range per network in `dnsmasq.d/`, rules between the networks in `nftables.conf`, and a switch that tags the ports |
+| A VPN server, for example WireGuard | A new interface, one open UDP port in the input chain, and rules for what the tunnel may reach |
+| IPv6 | Switch it on in `sysctl.d/90-router.conf`, replace the two IPv6 drop rules in `nftables.conf` with a real rule set, and add the WAN prefix and the LAN announcements |
+| PPPoE or a fixed WAN address | The `wan0` part of `profiles/prod/etc/network/interfaces` and `dhcpcd.conf` |
+| Suricata that blocks | The example only detects. Blocking is a change of the Suricata run mode and of the rule set |
+
+The safe way to add one is the same as for every change here: write it as files in the tree, add its check
+to `validate.sh`, try it in the `bench` profile, and deploy with the rollback. None of these parts has run in
+the example house, so treat the first deploy of each as a test.
+
+## Good to know
+
 - Tested on one machine and one internet provider. Expect to read and change files.
-- Suricata detects and does not block.
 - The daily brief needs a Claude subscription: it signs in with a token from `claude setup-token`, not with an
   API key. Everything else works without it.
 - No warranty. A firewall you do not understand is worse than the router you have. Read

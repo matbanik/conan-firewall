@@ -11,7 +11,9 @@ answers. A person without an agent answers them on paper and then follows [SETUP
    - **A value**: it goes into `site/<name>/site.env` under the key shown.
    - **An edit**: the default in the tree is used unless the person wants something else. Then you change the
      file shown, after the interview, and say what you changed.
-   - **A stop**: this tree does not support the answer. Say so. Do not go on as if it did.
+   - **An extension**: the example does not have this part, and nothing blocks it. Say that it is new and
+     untested here, note it, and build it after the interview by AGENTS.md rule 2.
+   - **A stop**: the hardware cannot do it. Say so. Do not go on as if it could.
 3. When the person does not know, take the **fail-safe default**. Every default leaves a feature off or a port
    closed. Nothing is opened by default.
 4. Start by copying the example: `cp -r site/example site/<name>` (`<name>` is one short word for the house,
@@ -41,10 +43,10 @@ a script. You never see them.
 
 | Id | Question | Sets | Fail-safe default |
 |---|---|---|---|
-| B1 | How does your present router get its internet address: automatically (DHCP), with a user name and password (PPPoE), or a fixed address? | Whether this tree fits | DHCP is the only method in this tree. **Stop** for PPPoE or a static address: `profiles/prod/etc/network/interfaces` and `dhcpcd.conf` would need new content that nobody has tested here |
+| B1 | How does your present router get its internet address: automatically (DHCP), with a user name and password (PPPoE), or a fixed address? | Whether this tree fits | DHCP is what the example has. PPPoE or a static address is an **extension**: new content for the `wan0` part of `profiles/prod/etc/network/interfaces` and `dhcpcd.conf`. The bench profile still uses DHCP behind the present router, so plan a test at the cutover |
 | B2 | Is the device in front of your router a plain modem or fiber terminal, or is it a router itself? | The cutover plan | If it is a router, the firewall would sit behind a second NAT. That works, but put that device in bridge mode if you can. Note the answer for block K |
 | B3 | Should the firewall use the WAN MAC address of your present router? Many providers tie the address lease to the MAC, so a clone keeps your public address. | `WAN_CLONE_MAC` (lower case), `WAN_CLONE_MAC_UC` (upper case) | Yes: read the WAN MAC from the old router's status page. For no clone, put the firewall's own `wan0` MAC in both keys once you know it (stage 4) |
-| B4 | Do you need IPv6? | Whether this tree fits | IPv6 is off, and the rules drop it. **Stop** if the person needs it |
+| B4 | Do you need IPv6? | Whether this tree fits | IPv6 is off in the example, and the rules drop it. If the person needs it, it is an **extension**: the sysctl, an IPv6 rule set, the WAN prefix and the LAN announcements, added together |
 | B5 | Do you need a name that follows your public address (dynamic DNS)? It is only needed when something outside connects in (block F). | `DDNS_NAME`; the provider's token is stored in stage 4 with `firewall/tools/store-wan-secrets.ps1` | No. Leave `DDNS_NAME` at the example value. With no token stored, the box makes no DDNS update |
 
 ## Block C. The LAN
@@ -56,7 +58,7 @@ a script. You never see them.
 | C3 | Is the automatic address range `.20` to `.254` with 24-hour leases right? | Edit `firewall/profiles/prod/etc/dnsmasq.d/10-profile.conf` | Keep it. Reservations may sit inside or outside the range |
 | C4 | Do you have a managed switch and an access point with fixed addresses? | The tree gives the names `switch` to `.3` and `ap` to `.4`, and accepts syslog (UDP 514) from those two addresses only. Edit `10-profile.conf`, the `in_lan` chain in `common/etc/nftables.conf`, and `common/etc/rsyslog.d/20-lan-devices.conf` together if yours differ | Give your switch `.3` and your access point `.4`. With no such devices, leave the files as they are: nothing listens there and nothing breaks |
 | C5 | What is the admin PC's host name and LAN address? | `ADMIN_HOST`, `ADMIN_HOST_LC` (the same name in lower case). The example gives it `.5` | Give the admin PC a reservation at `.5` in C2. The name appears in comments and in the brief text. The address matters: the example forward (F2) goes to `.5`, `validate.sh` tests the backup login from `.5`, and `pull-fw-backup.ps1 -Setup` lets the backup key in from `.5` only (its `-From` option changes that) |
-| C6 | Do you need separate networks (guest Wi-Fi, IoT, VLANs)? | Whether this tree fits | **Stop** if the person needs them now. This tree has one flat LAN. Guest isolation inside an access point still works, because the access point does it |
+| C6 | Do you need separate networks (guest Wi-Fi, IoT, VLANs)? | Whether this tree fits | The example has one flat LAN. Separate networks are an **extension**: VLAN interfaces on `trunk0`, a DHCP range and rules for each network, and a switch that tags. Guest isolation inside an access point works without any of this, because the access point does it |
 | C7 | Two more names with no function: an old log server, and the test laptop for the bench profile. | `LOG_HOST`, `BENCH_CLIENT`. Used in comments only | Keep the example values |
 
 ## Block D. DNS and blocking
@@ -145,7 +147,7 @@ Before any build, show the person:
 1. `site/<name>/site.env` in full. It holds no secret.
 2. The reservations file.
 3. A list of every edit you will make to files outside `site/<name>/`, with the reason.
-4. Every **stop** that came up, and what the person decided.
+4. Every **stop** and every **extension** that came up, and what the person decided.
 5. What stays **off** until they act: email, the brief, DDNS, the backup pull, country blocks, the shaper.
 6. What is **open** from the internet after the cutover. With the defaults: nothing.
 

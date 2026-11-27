@@ -40,9 +40,13 @@ These rules hold even when the person asks for a shortcut. Explain the reason an
 1. **Ask, do not guess.** Every value in `site.env` comes from the person or from a command whose output you
    show them. When the person does not know, use the fail-safe default from SETUP-QUESTIONS.md and say that you
    did.
-2. **Stop when the questionnaire says stop.** Some answers mean that this tree does not fit without real
-   changes (fewer than three network ports, PPPoE, VLANs). Say so plainly. Do not improvise a router
-   configuration.
+2. **Build what the example lacks properly, or not at all.** Some answers need a part that the example does
+   not have (PPPoE, IPv6, VLANs, a VPN server). Nothing blocks these parts, and the person may ask for them.
+   Say plainly that the part is new and has not run in the example house. Agree the design with the person.
+   Then write it as files in the tree, add its check to `validate.sh`, and prove it in the bench profile
+   before the cutover. Where you can, get the plain example running first and add the new part as its own
+   change. Never change the live box by hand to get there. A **stop** in the questionnaire (fewer than three
+   network ports) still means stop.
 3. **One change at a time on the box.** State what you will run and what it changes before you run it.
 
 ### Secrets
