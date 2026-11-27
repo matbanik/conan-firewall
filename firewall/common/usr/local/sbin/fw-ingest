@@ -1,0 +1,504 @@
+#!/usr/bin/python3
+"""fw-ingest: load the firewall's logs and fw-flowd's spool into the database. Runs as user fwdb, every 10 minutes.
+
+Each log is read from where the last run stopped (inode and offset, kept in the database, so a load that fails is
+repeated in full). Then it updates the device list and the signal table (detect.sql) and deletes old rows.
+
+  fw-ingest               run         fw-ingest selftest   check the parsers
+"""
+import ipaddress
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from collections import defaultdict
+from pathlib import Path
+
+ROOT = Path(os.environ.get("FWDB_ROOT") or "/var/lib/fwdb")
+SHARE = Path(os.environ.get("FWDB_SHARE") or "/usr/local/share/fwdb")
+DB, SPOOL, TMP = ROOT / "fwlog.duckdb", ROOT / "spool", ROOT / "tmp"
+FRIENDLY = ROOT / "names.tsv"        # optional, box only: mac or ip <TAB> name
+KNOWN = ROOT / "known-hosts.tsv"     # optional, box only, the owner's: ip <TAB> name <TAB> relation <TAB> expected ports <TAB> note
+ASN = ROOT / "ip2asn-v4.tsv.gz"      # written by fw-asn
+# Over LIMIT, the oldest rows of the biggest table go, until the database is under TARGET. DuckDB uses the freed space again,
+# so the file stays about this size. fw-archive has another 15 GB: /var/lib/fwdb stays under 100 GB.
+LIMIT, TARGET = int(os.environ.get("FWDB_LIMIT") or 85 * 10**9), int(os.environ.get("FWDB_TARGET") or 75 * 10**9)
+MAX_BYTES = 400 * 1024 * 1024        # per log and run
+LOGS = {
+    "firewall": "/var/log/firewall.log", "dns": "/var/log/dnsmasq.log", "dnsbl": "/var/log/dnsbl.log",
+    "eve": "/var/log/suricata/eve.json", "syslog": "/var/log/syslog", "auth": "/var/log/auth.log",
+    "lan": "/var/log/lan-devices.log",
+}
+RETENTION = {"flow_min": ("ts", 14), "flow_hour": ("hour", 400), "flow": ("start", 90), "dns_hour": ("hour", 90),
+             "service_hour": ("hour", 120), "remote_name": ("last_seen", 90), "alert": ("ts", 400), "drops": ("ts", 180),
+             "system_event": ("ts", 400), "signal": ("day", 400)}
+MONTHS = {m: i for i, m in enumerate("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(), 1)}
+
+
+# ---- reading -------------------------------------------------------------------------------------------------------
+def new_lines(path, state):
+    """-> (lines, new state). Reads the rest of a rotated file first."""
+    path = Path(path)
+    try:
+        st = path.stat()
+    except OSError:
+        return [], state
+    out, pos = [], 0
+    if state and state["inode"] == st.st_ino and state["pos"] <= st.st_size:
+        pos = state["pos"]
+    elif state and state["inode"] != st.st_ino:
+        for old in path.parent.glob(path.name + "*"):
+            try:
+                if old != path and old.stat().st_ino == state["inode"] and old.suffix != ".gz":
+                    out += read_from(old, state["pos"])[0]
+            except OSError:
+                pass
+    lines, pos = read_from(path, pos)
+    return out + lines, {"inode": st.st_ino, "pos": pos}
+
+
+def read_from(path, pos):
+    with open(path, "rb") as f:
+        f.seek(pos)
+        data = f.read(MAX_BYTES)
+    end = data.rfind(b"\n") + 1
+    return data[:end].decode("utf-8", "replace").splitlines(), pos + end
+
+
+def iso(ts):
+    return ts[:19].replace("T", " ")
+
+
+# ---- signatures ----------------------------------------------------------------------------------------------------
+def load_signatures(text):
+    sig = {}
+    for line in text.splitlines():
+        if line.strip() and not line.startswith("#"):
+            name, cat, app = line.split("\t")
+            sig[name] = (None, None) if cat == "none" else (cat, app)
+    return sig
+
+
+def match(sig, name, cache={}):
+    if name in cache:
+        return cache[name]
+    parts, hit = name.split("."), (None, None)
+    for i in range(len(parts) - 1):
+        hit = sig.get(".".join(parts[i:]))
+        if hit:
+            break
+    cache[name] = hit or (None, None)
+    return cache[name]
+
+
+# ---- parsers -------------------------------------------------------------------------------------------------------
+FW = re.compile(r"^(\S+) \S+ kernel: (?:\[[^\]]*\] )?((?:DROP|ACCEPT)[_ ]?[A-Z]*) ?IN=(\S*) OUT=(\S*)(.*)$")
+FW_KV = re.compile(r"\b(SRC|DST|PROTO|SPT|DPT)=(\S+)")
+
+
+def parse_firewall(lines, wan):
+    rows = []
+    for line in lines:
+        m = FW.match(line)
+        if not m:
+            continue
+        kv = {}
+        for k, v in FW_KV.findall(m.group(5)):
+            kv.setdefault(k, v)      # ICMP errors repeat the inner packet
+        rows.append({"ts": iso(m.group(1)), "prefix": m.group(2).strip(), "in_if": m.group(3), "out_if": m.group(4),
+                     "src": "wan" if kv.get("SRC") in wan else kv.get("SRC"),
+                     "dst": "wan" if kv.get("DST") in wan else kv.get("DST"), "proto": kv.get("PROTO"),
+                     "sport": num(kv.get("SPT")), "dport": num(kv.get("DPT"))})
+    return rows
+
+
+def num(v):
+    return int(v) if v and v.isdigit() else None
+
+
+DNS = re.compile(r"^(\w{3}) +(\d+) (\d\d:\d\d:\d\d) dnsmasq\[\d+\]: (\d+) ([0-9.]+)/(\d+) (\w+)(?:\[[^\]]*\])? (\S+) (?:is|from|to) (\S+)")
+
+
+def parse_dns(lines, year, month, sig):
+    """-> (dns_hour rows, remote_name rows)"""
+    hours, names, asked = {}, {}, {}
+    for line in lines:
+        m = DNS.match(line)
+        if not m:
+            continue
+        mon, day, clock, qid, dev, port, what, name, value = m.groups()
+        mo = MONTHS.get(mon)
+        if not mo or ":" in value and what == "query":
+            continue
+        ts = f"{year - (mo > month)}-{mo:02d}-{int(day):02d} {clock}"
+        hour, name, key = ts[:13] + ":00:00", name.lower().rstrip("."), (qid, dev, port)
+        dev = "firewall" if dev == "127.0.0.1" else dev
+        if what == "query":
+            asked[key] = name
+            h = hours.setdefault((hour, dev, name), [0, 0])
+            h[0] += 1
+        elif what in ("reply", "cached", "config"):
+            q = asked.get(key, name)
+            if value == "NXDOMAIN" and q == name:
+                hours.setdefault((hour, dev, q), [0, 0])[1] += 1
+            elif re.fullmatch(r"[0-9.]+", value) and not value.startswith(("0.", "127.", "192.168.")):
+                r = names.setdefault((dev, value, q), [ts, ts])
+                r[1] = ts
+    out = []
+    for (hour, dev, name), (n, nx) in hours.items():
+        cat, app = match(sig, name)
+        out.append({"hour": hour, "dev": dev, "name": name, "n": n, "nxdomain": nx, "cat": cat, "app": app})
+    return out, [{"dev": d, "ip": i, "name": n, "first_seen": f, "last_seen": l} for (d, i, n), (f, l) in names.items()]
+
+
+BL = re.compile(r"^(\S+) \S+ unbound: .*rpz: applied \[([^\]]+)\] \S+ \S+ \S+ (\S+?)\.? \S+ IN")
+
+
+def parse_dnsbl(lines):
+    n = defaultdict(int)
+    for line in lines:
+        m = BL.match(line)
+        if m and "allow" not in m.group(2):
+            n[(iso(m.group(1))[:13] + ":00:00", m.group(3).lower())] += 1
+    return [{"hour": h, "name": name, "n": c} for (h, name), c in n.items()]
+
+
+def parse_eve(lines, sig):
+    svc, alerts = defaultdict(int), []
+    for line in lines:
+        t = re.search(r'"event_type":"(tls|quic|http|ssh|alert)"', line)
+        if not t:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        kind, ts = t.group(1), iso(e["timestamp"])
+        if kind == "alert":
+            a = e["alert"]
+            alerts.append({"ts": ts, "sid": a.get("signature_id"), "signature": a.get("signature"), "category": a.get("category"),
+                           "severity": a.get("severity"), "src": e.get("src_ip"), "sport": e.get("src_port"),
+                           "dst": e.get("dest_ip"), "dport": e.get("dest_port"), "proto": e.get("proto")})
+            continue
+        body = e.get(kind) or {}
+        name = {"tls": body.get("sni"), "quic": body.get("sni"), "http": body.get("hostname"),
+                "ssh": (body.get("client") or {}).get("software_version")}[kind]
+        src, dst, port = e.get("src_ip"), e.get("dest_ip"), e.get("dest_port")
+        if not name or not src or ":" in src:
+            continue
+        # Suricata can see a connection's middle first and swap the sides. The LAN address is the device.
+        if not src.startswith("@@LAN_PREFIX@@.") and dst.startswith("@@LAN_PREFIX@@."):
+            src, dst, port = dst, src, e.get("src_port")
+        if dst.startswith("@@LAN_PREFIX@@.") and kind != "ssh":
+            continue
+        svc[(ts[:13] + ":00:00", src, dst, port, kind, str(name).lower()[:200])] += 1
+    out = []
+    for (hour, dev, remote, port, kind, name), n in svc.items():
+        cat, app = match(sig, name) if kind != "ssh" else (None, None)
+        out.append({"hour": hour, "dev": dev, "remote": remote, "port": port, "kind": kind, "name": name, "n": n,
+                    "cat": cat, "app": app})
+    return out, alerts
+
+
+SYS = re.compile(r"^(\S+T\S+) (\S+) ([\w./-]+?)(?:\[\d+\])?: (.*)$")
+KEEP_TAGS = re.compile(r"^(wan-ip-watch|fw-[a-z-]+|sshd(-session)?|suricata(-update)?|unattended-upgrade\S*|dhcpcd|systemd-tmpfiles|fleet|smartd)$")
+DROP_MSG = re.compile(r"pam_unix|session (opened|closed)|Connection (closed|reset)|Disconnected|Received disconnect")
+
+
+def parse_system(lines, every):
+    """every=True keeps all lines (LAN devices' syslog)."""
+    rows = []
+    for line in lines:
+        m = SYS.match(line)
+        if not m:
+            if every:
+                rows.append({"ts": time.strftime("%Y-%m-%d %H:%M:%S"), "host": "?", "tag": "?", "msg": line[:500]})
+            continue
+        ts, host, tag, msg = m.groups()
+        bad = tag == "sudo" and re.search(r"incorrect password|NOT in sudoers|authentication failure", msg)
+        failed = tag == "systemd" and re.search(r"Failed with result|Failed to start", msg)
+        if every or bad or failed or (KEEP_TAGS.match(tag) and not DROP_MSG.search(msg)):
+            rows.append({"ts": iso(ts), "host": host, "tag": tag, "msg": msg[:500]})
+    return rows
+
+
+# ---- devices -------------------------------------------------------------------------------------------------------
+def oui():
+    table = {}
+    for p in ("/usr/share/ieee-data/oui.txt", "/var/lib/ieee-data/oui.txt"):
+        try:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    m = re.match(r"^([0-9A-F]{6})\s+\(base 16\)\s+(.+)$", line)
+                    if m:
+                        table[m.group(1)] = m.group(2).strip()
+            break
+        except OSError:
+            continue
+    return table
+
+
+def devices():
+    now, host, seen, friendly = time.strftime("%Y-%m-%d %H:%M:%S"), {}, {}, {}
+    try:
+        for line in FRIENDLY.read_text(encoding="utf-8").splitlines():
+            k, _, v = line.partition("\t")
+            if v and not k.startswith("#"):
+                friendly[k.strip().lower()] = v.strip()
+    except OSError:
+        pass
+    try:
+        for line in Path("/var/lib/misc/dnsmasq.leases").read_text().splitlines():
+            f = line.split()
+            if len(f) >= 4:
+                host[f[1].lower()] = (f[2], f[3])
+    except OSError:
+        pass
+    r = subprocess.run(["ip", "-4", "neigh", "show", "dev", "trunk0"], capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        m = re.match(r"^(\S+) lladdr (\S+)\s.*?(REACHABLE|STALE|DELAY|PROBE|PERMANENT)", line)
+        if m:
+            seen[m.group(2).lower()] = (m.group(1), m.group(3) != "STALE")
+    names, rows = oui(), []
+    for mac in set(host) | set(seen):
+        ip = seen[mac][0] if mac in seen else host[mac][0]
+        # Online now: an active ARP entry. A lease or a stale entry alone can be a day old.
+        rows.append({"mac": mac, "ip": ip, "hostname": host.get(mac, (None, "*"))[1],
+                     "friendly": friendly.get(mac) or friendly.get(ip), "vendor": names.get(mac.replace(":", "")[:6].upper()),
+                     "random_mac": bool(int(mac[1], 16) & 2), "now": now, "online": mac in seen and seen[mac][1]})
+    return rows
+
+
+def known_hosts(text):
+    """-> rows for known_host. The list is the owner's; a bad line is reported and left out, so it can only lose a label."""
+    rows = {}
+    for line in text.splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        f = [x.strip() for x in line.split("\t")] + [""] * 5
+        try:
+            ip = str(ipaddress.IPv4Address(f[0]))
+        except ValueError:
+            print(f"known-hosts.tsv: not an address: {f[0][:40]!r}", file=sys.stderr)
+            continue
+        ports = [p.strip().lower() for p in f[3].split(",") if p.strip()]
+        if not f[1] or not all(re.fullmatch(r"(tcp|udp)/[0-9]+", p) for p in ports):
+            print(f"known-hosts.tsv: no name or a bad port for {ip}", file=sys.stderr)
+            continue
+        rows[ip] = {"ip": ip, "name": f[1], "relation": f[2], "ports": ",".join(ports), "note": f[4]}
+    return list(rows.values())
+
+
+# ---- database ------------------------------------------------------------------------------------------------------
+def duck(sql, mode=None, readonly=False, tries=60):
+    args = ["duckdb", "-bail"] + ([mode] if mode else []) + (["-readonly"] if readonly else []) + [str(DB)]
+    for i in range(tries):
+        r = subprocess.run(args, input=sql, capture_output=True, text=True)
+        if r.returncode == 0 or "lock" not in r.stderr.lower():
+            break
+        time.sleep(5)
+    if r.returncode:
+        raise SystemExit("duckdb: " + r.stderr.strip()[:1000])
+    return r.stdout
+
+
+COLS = {
+    "drops": "ts TIMESTAMP,prefix VARCHAR,in_if VARCHAR,out_if VARCHAR,src VARCHAR,dst VARCHAR,proto VARCHAR,sport INTEGER,dport INTEGER",
+    "dns": "hour TIMESTAMP,dev VARCHAR,name VARCHAR,n INTEGER,nxdomain INTEGER,cat VARCHAR,app VARCHAR",
+    "names": "dev VARCHAR,ip VARCHAR,name VARCHAR,first_seen TIMESTAMP,last_seen TIMESTAMP",
+    "blocked": "hour TIMESTAMP,name VARCHAR,n INTEGER",
+    "svc": "hour TIMESTAMP,dev VARCHAR,remote VARCHAR,port INTEGER,kind VARCHAR,name VARCHAR,n INTEGER,cat VARCHAR,app VARCHAR",
+    "alert": "ts TIMESTAMP,sid BIGINT,signature VARCHAR,category VARCHAR,severity INTEGER,src VARCHAR,sport INTEGER,dst VARCHAR,dport INTEGER,proto VARCHAR",
+    "sys": "ts TIMESTAMP,host VARCHAR,tag VARCHAR,msg VARCHAR",
+    "dev": "mac VARCHAR,ip VARCHAR,hostname VARCHAR,friendly VARCHAR,vendor VARCHAR,random_mac BOOLEAN,now TIMESTAMP,online BOOLEAN",
+    "known": "ip VARCHAR,name VARCHAR,relation VARCHAR,ports VARCHAR,note VARCHAR",
+    "fmin": "ts TIMESTAMP,dir VARCHAR,dev VARCHAR,remote VARCHAR,proto VARCHAR,port INTEGER,up BIGINT,down BIGINT,conns INTEGER",
+    "flow": "start TIMESTAMP,\"end\" TIMESTAMP,dir VARCHAR,dev VARCHAR,remote VARCHAR,proto VARCHAR,dev_port INTEGER,port INTEGER,replied BOOLEAN,up BIGINT,down BIGINT",
+}
+
+
+def used_bytes():
+    return int(json.loads(duck("SELECT used_blocks * block_size AS b FROM pragma_database_size();", "-json", readonly=True))[0]["b"])
+
+
+def limit_size():
+    size = used_bytes()
+    if size <= LIMIT:
+        if size > 0.8 * LIMIT:
+            print(f"WARNING: the database uses {size / 1e9:.1f} GB of its limit of {LIMIT / 1e9:.0f} GB", file=sys.stderr)
+        return
+    skip = set()
+    for _ in range(100):
+        sizes = json.loads(duck(" UNION ALL ".join(
+            f"SELECT '{t}' AS t, (SELECT count(DISTINCT block_id) FROM pragma_storage_info('{t}') WHERE persistent) AS b, "
+            f"(SELECT count(*) FROM {t}) AS n" for t in RETENTION) + ";", "-json", readonly=True))
+        left = [x for x in sizes if x["t"] not in skip and int(x["n"])]
+        if not left:
+            break
+        t = max(left, key=lambda x: int(x["b"]))["t"]
+        col, before = RETENTION[t][0], size
+        duck(f"DELETE FROM {t} WHERE {col} <= (SELECT quantile_disc({col}, 0.2) FROM {t}); CHECKPOINT;")
+        size = used_bytes()
+        print(f"WARNING: size limit: the oldest fifth of {t} removed, {before / 1e9:.2f} -> {size / 1e9:.2f} GB", file=sys.stderr)
+        if size <= TARGET:
+            return
+        if size >= before:      # no gain here: take the next table, and do not empty this one
+            skip.add(t)
+    print(f"ERROR: the database is still {size / 1e9:.1f} GB", file=sys.stderr)
+
+
+def src(kind, files):
+    cols = ", ".join("'%s': '%s'" % (c.split()[0].strip('"'), c.split()[1]) for c in COLS[kind].split(","))
+    names = ", ".join(f"'{f}'" for f in files)
+    return f"read_json([{names}], format='newline_delimited', columns={{{cols}}})"
+
+
+def run():
+    for d in (SPOOL, TMP):
+        d.mkdir(parents=True, exist_ok=True)
+    for f in TMP.iterdir():
+        f.unlink()
+    duck((SHARE / "schema.sql").read_text())
+    # duckdb's JSON writes UBIGINT as text
+    state = {r["path"]: {"inode": int(r["inode"]), "pos": int(r["pos"])}
+             for r in json.loads(duck("SELECT * FROM ingest_state", "-json", readonly=True).strip() or "[]")}
+    sig = load_signatures((SHARE / "signatures.tsv").read_text(encoding="utf-8"))
+    r = subprocess.run(["ip", "-4", "-o", "addr", "show", "dev", "wan0"], capture_output=True, text=True)
+    wan = set(re.findall(r"inet ([0-9.]+)/", r.stdout))
+    now = time.localtime()
+
+    lines, new_state = {}, {}
+    for name, path in LOGS.items():
+        lines[name], s = new_lines(path, state.get(path))
+        if s:
+            new_state[path] = s
+    rows = {"drops": parse_firewall(lines["firewall"], wan), "blocked": parse_dnsbl(lines["dnsbl"]), "dev": devices()}
+    try:
+        rows["known"] = known_hosts(KNOWN.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        rows["known"] = []
+    rows["dns"], rows["names"] = parse_dns(lines["dns"], now.tm_year, now.tm_mon, sig)
+    rows["svc"], rows["alert"] = parse_eve(lines["eve"], sig)
+    rows["sys"] = parse_system(lines["syslog"] + lines["auth"], False) + parse_system(lines["lan"], True)
+    files = {}
+    for kind, rr in rows.items():
+        if rr:
+            files[kind] = TMP / f"{kind}.ndjson"
+            files[kind].write_text("".join(json.dumps(x) + "\n" for x in rr), encoding="utf-8")
+    fmin, flow = sorted(SPOOL.glob("min-*.ndjson")), sorted(SPOOL.glob("flow-*.ndjson"))
+    active = SPOOL / "active.json"
+
+    sql = ["BEGIN;", "DELETE FROM known_host;"]
+    if "known" in files:
+        sql.append(f"INSERT INTO known_host SELECT * FROM {src('known', [files['known']])};")
+    if "drops" in files:
+        sql.append(f"INSERT INTO drops SELECT * FROM {src('drops', [files['drops']])};")
+    if "alert" in files:
+        sql.append(f"INSERT INTO alert SELECT * FROM {src('alert', [files['alert']])};")
+    if "sys" in files:
+        sql.append(f"INSERT INTO system_event SELECT * FROM {src('sys', [files['sys']])};")
+    if "dns" in files:
+        sql.append(f"INSERT INTO dns_hour SELECT hour, dev, name, n, nxdomain, 0, cat, app FROM {src('dns', [files['dns']])} "
+                   "ON CONFLICT DO UPDATE SET n = n + excluded.n, nxdomain = nxdomain + excluded.nxdomain;")
+    if "names" in files:
+        sql.append(f"INSERT INTO remote_name SELECT * FROM {src('names', [files['names']])} "
+                   "ON CONFLICT DO UPDATE SET last_seen = excluded.last_seen;")
+    if "blocked" in files:
+        # unbound sees only dnsmasq as its client, so the block is given to the devices that asked for that name in that hour.
+        sql.append(f"UPDATE dns_hour SET blocked = greatest(dns_hour.n, 1) FROM {src('blocked', [files['blocked']])} b "
+                   "WHERE b.hour = dns_hour.hour AND b.name = dns_hour.name;")
+    if "dns" in files or "blocked" in files:
+        # A blocked name stays blocked for its later questions in the same hour (dnsmasq answers those from its cache).
+        sql.append("UPDATE dns_hour SET blocked = n WHERE blocked > 0 AND hour >= localtimestamp - INTERVAL 1 DAY;")
+    if "svc" in files:
+        sql.append(f"INSERT INTO service_hour SELECT * FROM {src('svc', [files['svc']])} ON CONFLICT DO UPDATE SET n = n + excluded.n;")
+    if "dev" in files:
+        s = src("dev", [files["dev"]])
+        sql.append(f"INSERT INTO device SELECT mac, ip, hostname, friendly, vendor, random_mac, now, now FROM {s} "
+                   "ON CONFLICT DO UPDATE SET ip = excluded.ip, friendly = coalesce(excluded.friendly, friendly), "
+                   "hostname = CASE WHEN excluded.hostname = '*' THEN hostname ELSE excluded.hostname END, "
+                   "vendor = coalesce(excluded.vendor, vendor);")
+        sql.append(f"UPDATE device SET last_seen = s.now FROM {s} s WHERE s.mac = device.mac AND s.online;")
+        sql.append(f"INSERT INTO device_ip SELECT mac, ip, now, now FROM {s} WHERE online ON CONFLICT DO UPDATE SET last_seen = excluded.last_seen;")
+    if fmin:
+        s = src("fmin", fmin)
+        sql.append(f"INSERT INTO flow_min SELECT * FROM {s};")
+        # The hours these minutes fall in are added up again.
+        sql.append(f"CREATE TEMP TABLE h AS SELECT DISTINCT date_trunc('hour', ts) AS hour FROM {s};")
+        sql.append("DELETE FROM flow_hour WHERE hour IN (SELECT hour FROM h);")
+        sql.append("INSERT INTO flow_hour SELECT date_trunc('hour', ts), dir, dev, remote, proto, port, sum(up), sum(down), sum(conns) "
+                   "FROM flow_min WHERE date_trunc('hour', ts) IN (SELECT hour FROM h) GROUP BY ALL;")
+        sql.append(f"UPDATE device SET last_seen = greatest(device.last_seen, x.ts) FROM (SELECT dev, max(ts) AS ts FROM {s} GROUP BY 1) x "
+                   "WHERE x.dev = device.ip;")
+    if flow:
+        sql.append(f"INSERT INTO flow SELECT * FROM {src('flow', flow)};")
+    if active.is_file():
+        sql.append("DELETE FROM flow_active;")
+        if active.stat().st_size:
+            sql.append(f"INSERT INTO flow_active SELECT * FROM {src('flow', [active])};")
+    for path, s in new_state.items():
+        sql.append(f"INSERT OR REPLACE INTO ingest_state VALUES ('{path}', {s['inode']}, {s['pos']});")
+    for table, (col, days) in RETENTION.items():
+        sql.append(f"DELETE FROM {table} WHERE {col} < localtimestamp - INTERVAL {days} DAY;")
+    sql.append("COMMIT;")
+    (TMP / "load.sql").write_text("\n".join(sql))
+    duck("\n".join(sql))
+    # Loaded and committed: the spool files must go now, or an error further down would load them twice.
+    for f in fmin + flow + list(files.values()):
+        f.unlink()
+    more = []
+    if ASN.is_file():
+        more.append(
+            "INSERT INTO remote_net WITH t AS (SELECT DISTINCT remote AS ip FROM flow_hour WHERE hour >= localtimestamp - INTERVAL 2 DAY "
+            "AND regexp_full_match(remote, '[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+') AND remote NOT IN (SELECT ip FROM remote_net)), "
+            "n AS (SELECT ip, list_reduce(list_transform(string_split(ip, '.'), lambda x: x::UBIGINT), lambda a, b: a * 256 + b) AS v FROM t), "
+            "a AS (SELECT list_reduce(list_transform(string_split(s, '.'), lambda x: x::UBIGINT), lambda a, b: a * 256 + b) AS lo, "
+            "list_reduce(list_transform(string_split(e, '.'), lambda x: x::UBIGINT), lambda a, b: a * 256 + b) AS hi, asn, cc, org "
+            f"FROM read_csv('{ASN}', delim='\t', header=false, quote='', columns={{'s':'VARCHAR','e':'VARCHAR','asn':'BIGINT','cc':'VARCHAR','org':'VARCHAR'}})) "
+            "SELECT n.ip, CASE WHEN n.v <= a.hi THEN a.asn END, CASE WHEN n.v <= a.hi THEN a.cc END, CASE WHEN n.v <= a.hi THEN a.org END "
+            "FROM n ASOF LEFT JOIN a ON n.v >= a.lo;")
+    more.append((SHARE / "detect.sql").read_text())
+    more.append("CHECKPOINT;")
+    duck("\n".join(more))
+    limit_size()
+    print("loaded " + ", ".join(f"{k} {len(v)}" for k, v in rows.items()) + f", flow files {len(fmin) + len(flow)}")
+
+
+def selftest():
+    k = known_hosts("# c\n198.51.100.7\tAcme\tclient\tTCP/443, udp/53\tn\nx\tBad\n198.51.100.8\tB\t\tall\n198.51.100.9\tC\n")
+    assert [(r["ip"], r["ports"]) for r in k] == [("198.51.100.7", "tcp/443,udp/53"), ("198.51.100.9", "")], k
+    sig = load_signatures("a.com\tvpn\tX\nsafe.a.com\tnone\tS\n")
+    assert match(sig, "x.a.com") == ("vpn", "X") and match(sig, "q.safe.a.com") == (None, None) and match(sig, "ba.com") == (None, None)
+    d = parse_firewall(["2026-11-24T12:29:39.7-05:00 firewall kernel: DROP_WAN IN=wan0 OUT= MAC=a SRC=198.51.100.1 DST=203.0.113.7 "
+                        "LEN=52 PROTO=TCP SPT=50074 DPT=21114 WINDOW=1"], {"203.0.113.7"})
+    assert d[0]["prefix"] == "DROP_WAN" and d[0]["dst"] == "wan" and d[0]["dport"] == 21114, d
+    g = parse_firewall(["2026-11-24T12:29:39.7-05:00 firewall kernel: ACCEPT GEO IN=trunk0 OUT=wan0 SRC=@@LAN_PREFIX@@.9 DST=1.0.1.1 PROTO=ICMP"], set())
+    assert g[0]["prefix"] == "ACCEPT GEO" and g[0]["dport"] is None, g
+    h, n = parse_dns(["Nov 24 12:29:40 dnsmasq[1180]: 82165 @@LAN_PREFIX@@.5/57691 query[A] d.A.com from @@LAN_PREFIX@@.5",
+                      "Nov 24 12:29:40 dnsmasq[1180]: 82165 @@LAN_PREFIX@@.5/57691 reply d.a.com is <CNAME>",
+                      "Nov 24 12:29:40 dnsmasq[1180]: 82165 @@LAN_PREFIX@@.5/57691 reply e.cdn.net is 104.18.16.128",
+                      "Dec 31 23:59:59 dnsmasq[1180]: 9 @@LAN_PREFIX@@.5/5 query[A] old.org from @@LAN_PREFIX@@.5",
+                      "Nov 24 12:29:41 dnsmasq[1180]: 9 @@LAN_PREFIX@@.5/6 query[A] no.org from @@LAN_PREFIX@@.5",
+                      "Nov 24 12:29:41 dnsmasq[1180]: 9 @@LAN_PREFIX@@.5/6 reply no.org is NXDOMAIN"], 2026, 11, sig)
+    assert n == [{"dev": "@@LAN_PREFIX@@.5", "ip": "104.18.16.128", "name": "d.a.com", "first_seen": "2026-11-24 12:29:40",
+                  "last_seen": "2026-11-24 12:29:40"}], n
+    assert {(x["name"], x["hour"][:4], x["nxdomain"], x["cat"]) for x in h} == {
+        ("d.a.com", "2026", 0, "vpn"), ("old.org", "2025", 0, None), ("no.org", "2026", 1, None)}, h
+    b = parse_dnsbl(["2026-11-24T12:29:31.9-05:00 firewall unbound: [1:1] info: rpz: applied [hagezi-pro] *.t.us. rpz-nxdomain "
+                     "127.0.0.1@53910 us.t.us. A IN"])
+    assert b == [{"hour": "2026-11-24 12:00:00", "name": "us.t.us", "n": 1}], b
+    s, a = parse_eve(['{"timestamp":"2026-11-24T11:28:01.3-0500","event_type":"tls","src_ip":"@@LAN_PREFIX@@.88","src_port":5,"dest_ip":"1.2.3.4",'
+                      '"dest_port":443,"proto":"TCP","tls":{"sni":"Y.a.com"}}',
+                      '{"timestamp":"2026-11-24T11:28:01.3-0500","event_type":"alert","src_ip":"1.1.1.1","alert":{"signature_id":5,"severity":1}}'], sig)
+    assert s[0]["name"] == "y.a.com" and s[0]["cat"] == "vpn" and a[0]["sid"] == 5
+    y = parse_system(["2026-11-24T12:29:46.0-05:00 firewall sudo:  fwadmin : PWD=/ ; USER=root ; COMMAND=/x",
+                      "2026-11-24T12:29:46.0-05:00 firewall wan-ip-watch: WAN_DOWN"], False)
+    assert len(y) == 1 and y[0]["tag"] == "wan-ip-watch"
+    assert ipaddress.ip_address("@@LAN_PREFIX@@.1")
+    print("fw-ingest selftest ok")
+
+
+if __name__ == "__main__":
+    selftest() if sys.argv[1:] == ["selftest"] else run()

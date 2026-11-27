@@ -1,0 +1,122 @@
+#!/bin/sh
+# WAN events. Called by /etc/dhcpcd.exit-hook (dhcpcd reason, old IP, new IP) and by wan-check.timer (CHECK).
+# Replaces the WAN address watch that the old router and the admin PC ran.
+#   - logs to syslog tag wan-ip-watch (kept in the database)
+#   - on an IP change: updates DDNS (public addresses only) and sends an email
+#   - CHECK: catches a missed change, tracks WAN_DOWN / WAN_UP, compares the DDNS record with the WAN IP
+# Secrets are only in /etc/wan-event/ (root, 0600), written by tools/store-wan-secrets.ps1. Each file is optional:
+#   ddns.curl  curl config with the provider's update URL (and user/password if it needs them)
+#   ddns.name  the DDNS host name, for the record check
+# Email goes through fw-mail (its login: tools/store-mail-secret.ps1).
+# Usage: wan-event CHECK | TEST | <dhcpcd reason> [old-ip] [new-ip]
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+IF=wan0
+CONF=/etc/wan-event
+STATE=/var/lib/wan-event
+TAG=wan-ip-watch
+PROBES="9.9.9.9 1.1.1.1"
+
+mkdir -p "$STATE"
+exec 9>"$STATE/lock"
+flock -w 120 9 || exit 1
+
+log() { logger -t "$TAG" -p "daemon.${2:-info}" -- "$1"; }
+now() { date +%s; }
+get() { cat "$STATE/$1" 2>/dev/null; }
+put() { printf '%s\n' "$2" >"$STATE/$1.tmp" && mv "$STATE/$1.tmp" "$STATE/$1"; }
+cur_ip() { ip -4 -o addr show dev "$IF" scope global 2>/dev/null | awk '{ sub(/\/.*/, "", $4); print $4; exit }'; }
+
+is_public() {
+	case "$1" in
+	'' | 0.* | 10.* | 127.* | 169.254.* | 192.168.* | 172.1[6-9].* | 172.2[0-9].* | 172.3[01].*) return 1 ;;
+	100.6[4-9].* | 100.[7-9][0-9].* | 100.1[01][0-9].* | 100.12[0-7].*) return 1 ;;   # carrier-grade NAT
+	esac
+	return 0
+}
+
+send_mail() { # subject body: into the mail spool; fw-mail sends it when the WAN is up
+	if printf '%s\n' "$2" | /usr/local/sbin/fw-mail queue "$1" 2>"$STATE/mail.err"; then
+		log "email queued: $1"
+	else
+		log "email not queued: $(tr -d '\r\n' <"$STATE/mail.err" | head -c 200)" warning
+	fi
+}
+
+ddns_push() { # ip
+	[ -f "$CONF/ddns.curl" ] || return 0
+	if ! is_public "$1"; then log "DDNS skipped: $1 is not a public address"; return 0; fi
+	put ddns-last-push "$(now)"
+	reply=$(curl -sS --fail-with-body --max-time 40 -K "$CONF/ddns.curl" 2>&1)
+	rc=$?
+	reply=$(printf '%s' "$reply" | tr -d '\r\n' | head -c 120)
+	if [ $rc -eq 0 ]; then log "DDNS update for $1: $reply"; else log "DDNS update failed (curl $rc): $reply" warning; fi
+}
+
+ip_seen() { # ip why
+	old=$(get ip)
+	[ -n "$1" ] && [ "$1" != "$old" ] || return 0
+	put ip "$1"
+	put ip-since "$(now)"
+	log "WAN IP changed: ${old:-none} -> $1 ($2)" notice
+	ddns_push "$1"
+	send_mail "WAN IP changed to $1" "Old address: ${old:-none}
+New address: $1
+Reason: $2
+Time: $(date)"
+}
+
+check() {
+	ip=$(cur_ip)
+	ip_seen "$ip" "found by wan-check"
+
+	up=0
+	for p in $PROBES; do
+		if ping -n -q -c 1 -W 3 -I "$IF" "$p" >/dev/null 2>&1; then up=1; break; fi
+	done
+	prev=$(get link)
+	if [ $up -eq 0 ] && [ "$prev" != down ]; then
+		put link down
+		put down-since "$(now)"
+		log "WAN_DOWN: no reply from $PROBES (address ${ip:-none})" warning
+	elif [ $up -eq 1 ] && [ "$prev" = down ]; then
+		since=$(get down-since)
+		secs=$(($(now) - ${since:-$(now)}))
+		put link up
+		log "WAN_UP after ${secs}s (address $ip)" notice
+		send_mail "WAN back up" "The WAN was down for about $((secs / 60)) min. Address now: $ip."
+	elif [ $up -eq 1 ]; then
+		put link up
+	fi
+
+	# DDNS record check: public address, WAN up, and a name to check.
+	[ $up -eq 1 ] && [ -s "$CONF/ddns.name" ] && is_public "$ip" || return 0
+	name=$(head -n 1 "$CONF/ddns.name" | tr -d ' \r')
+	rec=$(dig +short +time=3 +tries=1 A "$name" @9.9.9.9 2>/dev/null | tail -n 1)
+	[ "$rec" = "$ip" ] && return 0
+	last=$(get ddns-last-push)
+	age=$(($(now) - ${last:-0}))
+	[ $age -lt 900 ] && return 0          # a push is still propagating
+	log "DDNS_MISMATCH: $name is ${rec:-unresolved}, WAN is $ip" warning
+	[ $age -ge 3600 ] && ddns_push "$ip"  # push again at most once an hour
+}
+
+mode=${1:-CHECK}
+case "$mode" in
+CHECK) check ;;
+TEST)
+	ip=$(cur_ip)
+	log "test run, WAN address ${ip:-none}"
+	send_mail "test message" "wan-event test. WAN address: ${ip:-none}."
+	[ "${2:-}" = ddns ] && ddns_push "$ip"
+	;;
+BOUND | REBIND | REBOOT)
+	ip=${3:-$(cur_ip)}
+	log "dhcp $mode on $IF: ${ip:-none}"
+	ip_seen "$ip" "dhcp $mode"
+	;;
+RENEW) ip_seen "${3:-$(cur_ip)}" "dhcp RENEW" ;;  # hourly with a 2 h lease; logged only on a change
+CARRIER) log "link up on $IF" ;;
+*) log "dhcp $mode on $IF (address was ${2:-none})" warning ;;
+esac
+exit 0

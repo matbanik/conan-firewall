@@ -1,0 +1,181 @@
+# suffix<TAB>category<TAB>app. The longest matching suffix wins; category "none" switches a shorter match off.
+#   remote-access  remote desktop and support tools     tunnel  publishes a LAN service on the internet
+#   vpn            VPN and overlay networks             relay   hole punching, STUN and TURN, P2P relays
+#   doh            encrypted DNS that skips the filter  telemetry  usage and crash reporting   p2p  file sharing
+anydesk.com	remote-access	AnyDesk
+teamviewer.com	remote-access	TeamViewer
+rustdesk.com	remote-access	RustDesk public server
+@@DDNS_NAME@@	remote-access	RustDesk own server (old name)
+splashtop.com	remote-access	Splashtop
+logmein.com	remote-access	LogMeIn
+logmeinrescue.com	remote-access	LogMeIn Rescue
+gotomypc.com	remote-access	GoToMyPC
+remotedesktop.google.com	remote-access	Chrome Remote Desktop
+remotedesktop-pa.googleapis.com	remote-access	Chrome Remote Desktop
+chromoting-host.googleapis.com	remote-access	Chrome Remote Desktop
+screenconnect.com	remote-access	ScreenConnect
+connectwise.com	remote-access	ConnectWise
+atera.com	remote-access	Atera
+ninjarmm.com	remote-access	NinjaOne
+ninjaone.com	remote-access	NinjaOne
+kaseya.com	remote-access	Kaseya
+kaseya.net	remote-access	Kaseya
+dwservice.net	remote-access	DWService
+realvnc.com	remote-access	RealVNC
+parsec.app	remote-access	Parsec
+parsecgaming.com	remote-access	Parsec
+assist.zoho.com	remote-access	Zoho Assist
+ultraviewer.net	remote-access	UltraViewer
+remoteutilities.com	remote-access	Remote Utilities
+supremocontrol.com	remote-access	Supremo
+aeroadmin.com	remote-access	AeroAdmin
+ammyy.com	remote-access	Ammyy
+getscreen.me	remote-access	Getscreen
+hoptodesk.com	remote-access	HopToDesk
+nomachine.com	remote-access	NoMachine
+beyondtrustcloud.com	remote-access	BeyondTrust
+bomgarcloud.com	remote-access	BeyondTrust
+meshcentral.com	remote-access	MeshCentral
+jumpcloud.com	remote-access	JumpCloud agent
+jcops.net	remote-access	JumpCloud agent
+jumpdesktop.com	remote-access	Jump Desktop
+todesk.com	remote-access	ToDesk
+oray.com	remote-access	Sunlogin
+ngrok.com	tunnel	ngrok
+ngrok.io	tunnel	ngrok
+ngrok.app	tunnel	ngrok
+ngrok-free.app	tunnel	ngrok
+ngrok-agent.com	tunnel	ngrok
+argotunnel.com	tunnel	Cloudflare Tunnel
+trycloudflare.com	tunnel	Cloudflare Tunnel
+cfargotunnel.com	tunnel	Cloudflare Tunnel
+devtunnels.ms	tunnel	Microsoft dev tunnels
+tunnels.api.visualstudio.com	tunnel	VS Code tunnels
+servicebus.windows.net	tunnel	Azure Relay
+localtunnel.me	tunnel	localtunnel
+loca.lt	tunnel	localtunnel
+serveo.net	tunnel	Serveo
+localhost.run	tunnel	localhost.run
+lhr.life	tunnel	localhost.run
+pinggy.io	tunnel	Pinggy
+bore.pub	tunnel	bore
+playit.gg	tunnel	playit
+packetriot.com	tunnel	Packetriot
+localxpose.io	tunnel	LocalXpose
+loclx.io	tunnel	LocalXpose
+pagekite.net	tunnel	PageKite
+telebit.cloud	tunnel	Telebit
+zrok.io	tunnel	zrok
+tunnelmole.net	tunnel	Tunnelmole
+portmap.io	tunnel	portmap.io
+remote.it	tunnel	remote.it
+remoteit.com	tunnel	remote.it
+nabu.casa	tunnel	Home Assistant Cloud
+synology.me	tunnel	Synology DDNS
+quickconnect.to	tunnel	Synology QuickConnect
+myqnapcloud.com	tunnel	QNAP cloud
+relay.plex.tv	tunnel	Plex Relay
+plex.direct	tunnel	Plex remote access name
+tailscale.com	vpn	Tailscale
+tailscale.io	vpn	Tailscale
+ts.net	vpn	Tailscale
+zerotier.com	vpn	ZeroTier
+netbird.io	vpn	NetBird
+twingate.com	vpn	Twingate
+hamachi.cc	vpn	Hamachi
+radmin-vpn.com	vpn	Radmin VPN
+cloudflareclient.com	vpn	Cloudflare WARP
+nordvpn.com	vpn	NordVPN
+expressvpn.com	vpn	ExpressVPN
+surfshark.com	vpn	Surfshark
+protonvpn.com	vpn	Proton VPN
+privateinternetaccess.com	vpn	PIA
+mullvad.net	vpn	Mullvad
+windscribe.com	vpn	Windscribe
+torproject.org	vpn	Tor
+hola.org	relay	Hola (shares this line)
+honeygain.com	relay	Honeygain (shares this line)
+packetstream.io	relay	PacketStream (shares this line)
+earnapp.com	relay	EarnApp (shares this line)
+iproyal.com	relay	IPRoyal Pawns (shares this line)
+luminati.io	relay	Bright Data (shares this line)
+brightdata.com	relay	Bright Data (shares this line)
+stun.l.google.com	relay	STUN Google
+stun1.l.google.com	relay	STUN Google
+stun2.l.google.com	relay	STUN Google
+stun3.l.google.com	relay	STUN Google
+stun4.l.google.com	relay	STUN Google
+stun.cloudflare.com	relay	STUN Cloudflare
+turn.cloudflare.com	relay	TURN Cloudflare
+stun.services.mozilla.com	relay	STUN Mozilla
+stun.twilio.com	relay	STUN Twilio
+turn.twilio.com	relay	TURN Twilio
+syncthing.net	relay	Syncthing
+resilio.com	p2p	Resilio Sync
+router.bittorrent.com	p2p	BitTorrent
+router.utorrent.com	p2p	BitTorrent
+dht.transmissionbt.com	p2p	BitTorrent
+tuyaus.com	relay	Tuya device cloud
+tuyaeu.com	relay	Tuya device cloud
+tuyacn.com	relay	Tuya device cloud
+reolink.com	relay	Reolink
+ezvizlife.com	relay	EZVIZ
+hik-connect.com	relay	Hik-Connect
+wyzecam.com	relay	Wyze
+iotcplatform.com	relay	ThroughTek Kalay P2P
+throughtek.com	relay	ThroughTek Kalay P2P
+xmeye.net	relay	XMEye P2P
+dns.google	doh	Google DoH
+cloudflare-dns.com	doh	Cloudflare DoH
+one.one.one.one	doh	Cloudflare DoH
+dns.quad9.net	doh	Quad9 DoH
+doh.opendns.com	doh	OpenDNS DoH
+dns.nextdns.io	doh	NextDNS
+dns.adguard-dns.com	doh	AdGuard DNS
+dns.controld.com	doh	Control D
+freedns.controld.com	doh	Control D
+doh.cleanbrowsing.org	doh	CleanBrowsing
+doh.dns.apple.com	doh	Apple DoH
+mask.icloud.com	doh	iCloud Private Relay
+mask-h2.icloud.com	doh	iCloud Private Relay
+data.microsoft.com	telemetry	Windows
+watson.microsoft.com	telemetry	Windows
+telemetry.microsoft.com	telemetry	Windows
+dc.services.visualstudio.com	telemetry	Application Insights
+applicationinsights.azure.com	telemetry	Application Insights
+telemetry.zoom.us	telemetry	Zoom
+unagi.amazon.com	telemetry	Amazon
+fls-na.amazon.com	telemetry	Amazon
+device-metrics-us.amazon.com	telemetry	Amazon devices
+device-metrics-us-2.amazon.com	telemetry	Amazon devices
+amazon-adsystem.com	telemetry	Amazon ads
+telemetry.mozilla.org	telemetry	Firefox
+metrics.icloud.com	telemetry	Apple
+metrics.apple.com	telemetry	Apple
+xp.apple.com	telemetry	Apple
+app-measurement.com	telemetry	Google Firebase
+firebaselogging-pa.googleapis.com	telemetry	Google Firebase
+crashlytics.com	telemetry	Crashlytics
+google-analytics.com	telemetry	Google Analytics
+analytics.google.com	telemetry	Google Analytics
+sentry.io	telemetry	Sentry
+bugsnag.com	telemetry	Bugsnag
+datadoghq.com	telemetry	Datadog
+browser-intake-datadoghq.com	telemetry	Datadog
+newrelic.com	telemetry	New Relic
+nr-data.net	telemetry	New Relic
+segment.io	telemetry	Segment
+mixpanel.com	telemetry	Mixpanel
+amplitude.com	telemetry	Amplitude
+statsigapi.net	telemetry	Statsig
+launchdarkly.com	telemetry	LaunchDarkly
+appsflyer.com	telemetry	AppsFlyer
+appsflyersdk.com	telemetry	AppsFlyer
+adjust.com	telemetry	Adjust
+posthog.com	telemetry	PostHog
+gfe.nvidia.com	telemetry	NVIDIA
+logs.netflix.com	telemetry	Netflix
+ichnaea.netflix.com	telemetry	Netflix
+samsungacr.com	telemetry	Samsung TV
+samsungads.com	telemetry	Samsung TV
+logs.roku.com	telemetry	Roku

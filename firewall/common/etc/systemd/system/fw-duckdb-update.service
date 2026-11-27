@@ -1,0 +1,8 @@
+[Unit]
+Description=Update the DuckDB CLI from its GitHub release (checksum verified)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/fw-duckdb-update

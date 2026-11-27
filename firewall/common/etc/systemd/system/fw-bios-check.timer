@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly BIOS check against Lenovo's catalog
+
+[Timer]
+OnCalendar=Sat 04:00
+RandomizedDelaySec=30min
+Persistent=yes
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,4 @@
+# Everything here runs or is read on Debian. Keep LF in the working copy on Windows too.
+* text=auto eol=lf
+*.png binary
+*.jpg binary

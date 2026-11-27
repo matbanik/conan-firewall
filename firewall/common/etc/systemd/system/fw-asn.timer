@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly network-owner table
+
+[Timer]
+OnCalendar=Sun 03:20
+RandomizedDelaySec=20min
+Persistent=yes
+
+[Install]
+WantedBy=timers.target

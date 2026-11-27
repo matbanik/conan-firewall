@@ -1,0 +1,12 @@
+%YAML 1.1
+---
+# Loaded with --include by the suricata.service drop-in, so the packaged suricata.yaml stays untouched.
+# Replaces the first af-packet entry (eth0) with the LAN trunk. HOME_NET's default (all RFC1918) already
+# covers @@LAN_PREFIX@@.0/24. Alerts: eve.json and fast.log on the box; fw-ingest loads them into the database.
+af-packet:
+  - interface: trunk0
+    cluster-id: 99
+    cluster-type: cluster_flow
+    defrag: yes
+    use-mmap: yes
+    tpacket-v3: yes

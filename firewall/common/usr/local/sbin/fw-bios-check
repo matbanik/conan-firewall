@@ -1,0 +1,114 @@
+#!/usr/bin/python3 -I
+"""fw-bios-check: is a newer BIOS out for this Lenovo? Weekly (fw-bios-check.timer). It only checks; it installs nothing.
+
+It reads the machine type from DMI (the first four characters of the product name) and Lenovo's update catalog for that type, the same catalog that
+Lenovo System Update and Update Retriever use. The BIOS package descriptor must match the SHA-256 the catalog gives
+for it. The result goes to $STATE_DIRECTORY/status.txt (read by fw-updates, so it is in the daily report) and to syslog.
+A BIOS update stays a manual job: Lenovo ships it as a Windows program or a bootable USB/ISO image.
+"""
+import hashlib
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+CATALOG = "https://download.lenovo.com/catalog/{mt}_{os}.xml"
+SEVERITY = {"1": "critical", "2": "recommended", "3": "optional"}
+STATE = Path(os.environ.get("STATE_DIRECTORY") or "/var/lib/fw-bios-check")
+
+
+def dmi(name):
+    try:
+        return Path(f"/sys/class/dmi/id/{name}").read_text().strip()
+    except OSError:
+        return ""
+
+
+def fetch(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "fw-bios-check"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return r.read(5_000_000)
+
+
+def log(prio, msg):
+    subprocess.run(["logger", "-t", "fw-bios-check", "-p", f"daemon.{prio}", "--", msg], check=False)
+    print(msg)
+
+
+def write(lines):
+    STATE.mkdir(parents=True, exist_ok=True)
+    tmp = STATE / "status.tmp"
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tmp.replace(STATE / "status.txt")
+
+
+def latest(mt):
+    """The newest BIOS package in the catalogs for machine type mt: (version, release date, severity, descriptor url)."""
+    found, errors = {}, []
+    for os_name in ("Win11", "Win10"):
+        try:
+            cat = ET.fromstring(fetch(CATALOG.format(mt=mt, os=os_name)).lstrip(b"\xef\xbb\xbf"))
+        except Exception as e:  # noqa: BLE001 - one missing catalog is normal
+            errors.append(f"{os_name}: {e}")
+            continue
+        for pkg in cat.iter("package"):
+            if (pkg.findtext("category") or "").strip().upper() != "BIOS UEFI":
+                continue
+            url = (pkg.findtext("location") or "").strip()
+            want = (pkg.findtext("checksum") or "").strip().lower()
+            if url and url not in found:
+                found[url] = want
+    if not found:
+        raise RuntimeError("no BIOS package in the Lenovo catalog (" + "; ".join(errors or ["empty"]) + ")")
+    best = None
+    for url, want in found.items():
+        body = fetch(url)
+        if want and hashlib.sha256(body).hexdigest() != want:
+            raise RuntimeError(f"checksum mismatch for {url}")
+        root = ET.fromstring(body.lstrip(b"\xef\xbb\xbf"))
+        ver = root.get("version") or ""
+        date = (root.findtext("ReleaseDate") or "").strip()
+        sev = root.find("Severity")
+        cand = (ver, date, SEVERITY.get(sev.get("type") if sev is not None else "", "unknown"), url)
+        if best is None or (date, ver) > (best[1], best[0]):
+            best = cand
+    return best
+
+
+def main():
+    now = time.strftime("%Y-%m-%d %H:%M")
+    installed, bdate = dmi("bios_version"), dmi("bios_date")
+    product, vendor = dmi("product_name"), dmi("sys_vendor")
+    if vendor.upper() != "LENOVO" or len(product) < 4:
+        write([f"checked {now}", f"BIOS check: not a Lenovo machine type ({vendor} {product}); nothing to check"])
+        return 0
+    mt = product[:4]
+    try:
+        ver, date, sev, url = latest(mt)
+    except Exception as e:  # noqa: BLE001
+        write([f"checked {now}", f"BIOS check FAILED: {e}", f"Installed BIOS {installed} dated {bdate}"])
+        log("warning", f"BIOS check failed: {e}")
+        return 1
+    # Lenovo BIOS levels are <4-character family><2-digit build><revision letter>, e.g. M1UKT79A.
+    def build(v):
+        m = re.match(r"^[A-Z0-9]{5}(\d\d)([A-Z]?)", v.upper())
+        return (int(m.group(1)), m.group(2)) if m else None
+    bi, bl = build(installed), build(ver)
+    if bi and bl and bl > bi:
+        state = f"NEWER BIOS AVAILABLE: {ver} released {date} ({sev}); installed {installed} dated {bdate}. Install by hand."
+        log("notice", state)
+    elif bi and bl:
+        state = f"BIOS current: installed {installed} dated {bdate}; Lenovo's newest for {mt} is {ver} released {date}"
+        log("info", state)
+    else:
+        state = f"BIOS check: cannot compare installed {installed} with Lenovo's {ver} ({date}, {sev})"
+        log("warning", state)
+    write([f"checked {now} (machine type {mt}, {product} {dmi('product_version')})", state, f"descriptor {url}"])
+    return 0
+
+
+sys.exit(main())

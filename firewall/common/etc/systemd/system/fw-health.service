@@ -1,0 +1,6 @@
+[Unit]
+Description=Hourly firewall health line to syslog
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/fw-health

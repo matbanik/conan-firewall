@@ -1,0 +1,17 @@
+# Bench interfaces. wan0 plugs into an ASUS LAN port and gets a @@LAN_PREFIX@@.x lease (own MAC, no clone).
+# trunk0 goes to a test client only (@@BENCH_CLIENT@@ by cable), never to the house switch.
+source /etc/network/interfaces.d/*
+
+auto lo
+iface lo inet loopback
+
+auto mgmt0
+iface mgmt0 inet static
+	address 10.255.255.1/30
+
+auto wan0
+iface wan0 inet dhcp
+
+auto trunk0
+iface trunk0 inet static
+	address 192.168.12.1/24

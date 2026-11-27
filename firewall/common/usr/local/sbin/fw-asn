@@ -1,0 +1,8 @@
+#!/bin/sh
+# Weekly: the list that says which network owns an address (iptoasn.com, public domain). Runs as user fwdb.
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+F=/var/lib/fwdb/ip2asn-v4.tsv.gz
+curl -sS -f --max-time 120 -o "$F.new" https://iptoasn.com/data/ip2asn-v4.tsv.gz
+[ "$(gzip -dc "$F.new" | wc -l)" -gt 300000 ] || { echo "ip2asn download is too small; the old file stays" >&2; rm -f "$F.new"; exit 1; }
+mv "$F.new" "$F"

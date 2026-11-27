@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily database report (after the 04:30 update reboot)
+
+[Timer]
+OnCalendar=*-*-* 05:30
+Persistent=yes
+
+[Install]
+WantedBy=timers.target

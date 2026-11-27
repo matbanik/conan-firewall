@@ -1,0 +1,18 @@
+# Production values for /etc/nftables.conf (house network, the provider on wan0).
+define WAN_IF = "wan0"
+define LAN_IF = "trunk0"
+define MGMT_IF = "mgmt0"
+
+define LAN_NET = @@LAN_PREFIX@@.0/24
+define FW_ADDRS = { @@LAN_PREFIX@@.1, 10.255.255.1 }
+
+define RUSTDESK_HOST = @@LAN_PREFIX@@.5
+define RUSTDESK_REMOTE = @@REMOTE_SRC@@
+
+table inet fw {
+	# SSH from WAN: none in production.
+	set wan_ssh_allow {
+		type ipv4_addr
+		flags interval
+	}
+}

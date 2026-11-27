@@ -1,0 +1,9 @@
+[Unit]
+Description=Weekly archive of the firewall database (Tuesday, for the week that ended on Sunday)
+
+[Timer]
+OnCalendar=Tue *-*-* 05:10
+Persistent=yes
+
+[Install]
+WantedBy=timers.target

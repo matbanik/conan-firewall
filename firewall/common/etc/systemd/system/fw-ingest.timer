@@ -1,0 +1,10 @@
+[Unit]
+Description=Load logs into the firewall database every 10 minutes
+
+[Timer]
+OnCalendar=*:0/10
+RandomizedDelaySec=20
+Persistent=no
+
+[Install]
+WantedBy=timers.target

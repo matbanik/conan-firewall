@@ -1,0 +1,42 @@
+# The daily brief: one Claude session as user fleet. The sandbox is the one of fleet-member.service; the reasons for the
+# lines that are weaker than usual (Claude runs each command in bubblewrap) are written there.
+[Unit]
+Description=Daily brief by the analysis agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=fleet
+Group=fleet
+SupplementaryGroups=adm systemd-journal fwspool
+WorkingDirectory=/var/lib/fw-analysis
+Environment=HOME=/home/fleet DISABLE_AUTOUPDATER=1 PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/local/sbin/fw-brief
+TimeoutStartSec=60min
+UMask=0077
+Nice=10
+CPUWeight=20
+IOWeight=20
+MemoryMax=4G
+TasksMax=256
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindPaths=/home/fleet
+ReadWritePaths=/var/lib/fw-analysis /var/spool/fw-mail
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+RestrictNamespaces=user mnt pid net ipc uts cgroup
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictSUIDSGID=no
+ProtectKernelTunables=no
+ProtectKernelLogs=no
+ProtectHostname=no

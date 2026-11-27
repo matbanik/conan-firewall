@@ -1,0 +1,274 @@
+#!/usr/bin/python3
+"""fw-flowd: who talks to whom, and how much, from the kernel's connection table. Runs as user fwdb (CAP_NET_ADMIN).
+
+Every minute it reads `conntrack -L`, works out how many bytes each connection moved since the last minute, and adds
+them up per device, remote address, protocol and port. `conntrack -E -e DESTROY` gives the final counters of each
+connection that ends. It writes NDJSON into SPOOL; fw-ingest loads that into the database:
+  min-*.ndjson   per-minute byte counts      flow-*.ndjson   finished connections
+  active.json    connections open for more than 30 minutes (rewritten every 5 minutes)
+Only routed traffic is seen. Traffic between two LAN devices never reaches the firewall.
+
+  fw-flowd            run            fw-flowd selftest   check the parser
+"""
+import ipaddress
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+SPOOL = Path(os.environ.get("FWDB_SPOOL") or "/var/lib/fwdb/spool")
+LAN = ipaddress.ip_network(os.environ.get("FWDB_LAN") or "@@LAN_PREFIX@@.0/24")
+FW_IPS = {"@@LAN_PREFIX@@.1", "10.255.255.1"}
+TICK, ROTATE_TICKS, LONG_S = 60, 5, 1800
+OWN_SERVICES = {53, 67, 123}          # DNS, DHCP and NTP on the firewall: dnsmasq.log already has these
+PAIR = re.compile(r"\b(src|dst|sport|dport|packets|bytes|id)=(\S+)")
+PROTO = re.compile(r"(?:^ipv[46]\s+\d+\s+|\[DESTROY\]\s+)(\S+)\s+(\d+)")
+DELTA = re.compile(r"delta-time=(\d+)")
+NAMES = {6: "tcp", 17: "udp", 1: "icmp", 47: "gre", 50: "esp", 51: "ah", 41: "ipv6-in-ip"}
+
+
+def parse(line):
+    """A conntrack line -> dict, or None."""
+    m = PROTO.search(line)
+    if not m:
+        return None
+    num = int(m.group(2))
+    orig, reply, cid, side = {}, {}, None, None
+    for k, v in PAIR.findall(line):
+        if k == "id":       # an ICMP tuple has its own id=; the connection id is the last one on the line
+            cid = v
+            continue
+        if k == "src":
+            side = orig if side is None else reply
+        if side is not None:
+            side[k] = v
+    if "src" not in orig or "src" not in reply:
+        return None
+    d = DELTA.search(line)
+    return {
+        "key": (cid, num, orig["src"], orig["dst"], orig.get("sport"), orig.get("dport")),
+        "proto": NAMES.get(num, f"ip-{num}"), "o": orig, "r": reply, "age": int(d.group(1)) if d else 0,
+        "replied": "[UNREPLIED]" not in line,
+        "ob": int(orig.get("bytes", 0)), "rb": int(reply.get("bytes", 0)),
+    }
+
+
+def in_lan(ip):
+    try:
+        return ipaddress.ip_address(ip) in LAN
+    except ValueError:
+        return False
+
+
+def port_of(side, name):
+    return int(side[name]) if name in side else None
+
+
+def classify(c, wan):
+    """-> (direction, device, remote, device_port, service_port, up_is_orig) or None to skip."""
+    src, dst, rsrc = c["o"]["src"], c["o"]["dst"], c["r"]["src"]
+    if ":" in src:
+        return None
+    for ip in (src, dst):
+        a = ipaddress.ip_address(ip)
+        if a.is_loopback or a.is_multicast or a.is_link_local or a.is_unspecified or ip.endswith(".255"):
+            return None
+    sport, dport, rport = port_of(c["o"], "sport"), port_of(c["o"], "dport"), port_of(c["r"], "sport")
+    own = FW_IPS | wan
+    if src in own:
+        return None if in_lan(dst) or dst in own else ("fw-out", "firewall", dst, sport, dport, True)
+    if in_lan(src):
+        if rsrc in own:
+            return None if dport in OWN_SERVICES else ("fw-in-lan", src, "firewall", sport, dport, True)
+        if dst in wan and in_lan(rsrc):
+            return ("hairpin", src, rsrc, sport, dport, True)
+        return None if in_lan(dst) else ("out", src, dst, sport, dport, True)
+    if src.startswith("10.255.255."):
+        return None
+    if in_lan(rsrc):
+        return ("in", rsrc, src, rport, rport, False)
+    if rsrc in own:
+        return ("fw-in", "firewall", src, dport, dport, False)
+    return None
+
+
+def wan_ips():
+    try:
+        out = subprocess.run(["ip", "-4", "-o", "addr", "show", "dev", "wan0"],
+                             capture_output=True, text=True, timeout=10).stdout
+        return set(re.findall(r"inet ([0-9.]+)/", out))
+    except (OSError, subprocess.SubprocessError):
+        return set()
+
+
+def stamp(t):
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
+
+
+def put(path, text):
+    tmp = path.with_name("." + path.name)
+    tmp.write_text(text)
+    tmp.replace(path)
+
+
+class Tracker:
+    def __init__(self, spool, now=time.time):
+        self.spool, self.now, self.lock = spool, now, threading.Lock()
+        self.conns = {}     # key -> {cls, ob, rb, start, seen, proto, replied}
+        self.agg = {}       # (dir, dev, remote, proto, port) -> [up, down, new]
+        self.flows, self.mins = [], []
+        self.wan, self.first, self.pass_no, self.ticks = set(), True, 0, 0
+
+    def update(self, c, final=False):
+        t, old = self.now(), self.conns.get(c["key"])
+        cls = old["cls"] if old else classify(c, self.wan)
+        if cls is None:
+            return
+        if old is None:
+            old = {"cls": cls, "ob": 0, "rb": 0, "start": t - c["age"], "proto": c["proto"], "new": True}
+            # Connections that were open before this daemon started: their bytes were moved earlier.
+            if self.first and c["age"] > TICK:
+                old.update(ob=c["ob"], rb=c["rb"], new=False)
+            self.conns[c["key"]] = old
+        do, dr = max(0, c["ob"] - old["ob"]), max(0, c["rb"] - old["rb"])
+        direction, dev, remote, _, port, up_orig = cls
+        a = self.agg.setdefault((direction, dev, remote, c["proto"], port), [0, 0, 0])
+        a[0] += do if up_orig else dr
+        a[1] += dr if up_orig else do
+        a[2] += int(old.pop("new", False))
+        old.update(ob=max(c["ob"], old["ob"]), rb=max(c["rb"], old["rb"]), seen=self.pass_no, replied=c["replied"])
+        if final:
+            self.finish(c["key"], t)
+
+    def record(self, o, end):
+        direction, dev, remote, dev_port, port, up_orig = o["cls"]
+        return {"start": stamp(o["start"]), "end": stamp(end), "dir": direction, "dev": dev, "remote": remote,
+                "proto": o["proto"], "dev_port": dev_port, "port": port, "replied": bool(o.get("replied")),
+                "up": o["ob"] if up_orig else o["rb"], "down": o["rb"] if up_orig else o["ob"]}
+
+    def finish(self, key, end):
+        o = self.conns.pop(key, None)
+        if o:
+            self.flows.append(self.record(o, end))
+
+    def tick(self, lines):
+        with self.lock:
+            self.pass_no += 1
+            for line in lines:
+                c = parse(line)
+                if c:
+                    self.update(c)
+            # Gone from the table without a DESTROY event (the event was lost)
+            for key in [k for k, o in self.conns.items() if o["seen"] < self.pass_no - 1]:
+                self.finish(key, self.now())
+            t = stamp(self.now() - self.now() % 60)
+            for (direction, dev, remote, proto, port), (up, down, new) in self.agg.items():
+                if up or down or new:
+                    self.mins.append({"ts": t, "dir": direction, "dev": dev, "remote": remote, "proto": proto,
+                                      "port": port, "up": up, "down": down, "conns": new})
+            self.agg, self.first = {}, False
+            self.ticks += 1
+            if self.ticks % ROTATE_TICKS == 0:
+                self.write()
+
+    def write(self):
+        n = int(self.now() * 1000)
+        for name, rows in (("min", self.mins), ("flow", self.flows)):
+            if rows:
+                put(self.spool / f"{name}-{n}.ndjson", "".join(json.dumps(r) + "\n" for r in rows))
+        self.mins, self.flows = [], []
+        active = [self.record(o, self.now()) for o in self.conns.values()
+                  if self.now() - o["start"] > LONG_S or o["cls"][0] in ("in", "fw-in")]
+        put(self.spool / "active.json", "".join(json.dumps(r) + "\n" for r in active))
+
+    def events(self):
+        while True:
+            p = subprocess.Popen(
+                ["conntrack", "-E", "-e", "DESTROY", "-o", "timestamp,id,ktimestamp", "-b", "4194304"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+            for line in p.stdout:
+                c = parse(line)
+                if c:
+                    with self.lock:
+                        self.update(c, final=True)
+            p.wait()
+            time.sleep(2)
+
+
+def main():
+    import signal
+    SPOOL.mkdir(parents=True, exist_ok=True)
+    tr = Tracker(SPOOL)
+    tr.wan = wan_ips()
+
+    def stop(*_):
+        # A tick may hold the lock; losing up to 5 minutes is better than hanging.
+        if tr.lock.acquire(timeout=5):
+            tr.write()
+        os._exit(0)
+    signal.signal(signal.SIGTERM, stop)
+    started = False
+    while True:
+        t0 = time.monotonic()
+        tr.wan = wan_ips() or tr.wan
+        r = subprocess.run(["conntrack", "-L", "-f", "ipv4", "-o", "extended,id,ktimestamp"],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            tr.tick(r.stdout.splitlines())
+            if not started:     # after the first pass, so old connections are known before they end
+                threading.Thread(target=tr.events, daemon=True).start()
+                started = True
+        else:
+            print("conntrack -L failed:", r.stderr.strip()[:200], file=sys.stderr, flush=True)
+        time.sleep(max(1, TICK - (time.monotonic() - t0)))
+
+
+def selftest():
+    import tempfile
+    live = ("ipv4     2 tcp      6 431999 ESTABLISHED src=@@LAN_PREFIX@@.45 dst=198.51.100.9 sport=5000 dport=443 "
+            "packets=3 bytes={} src=198.51.100.9 dst=203.0.113.7 sport=443 dport=5000 packets=2 bytes={} [ASSURED] "
+            "mark=0 delta-time={} [start=Tue Nov 24 12:25:25 2026] use=1 id=77")
+    gone = ("[1795541130.1]\t[DESTROY] tcp      6 src=@@LAN_PREFIX@@.45 dst=198.51.100.9 sport=5000 dport=443 packets=9 "
+            "bytes=900 src=198.51.100.9 dst=203.0.113.7 sport=443 dport=5000 packets=9 bytes=9000 [ASSURED] "
+            "delta-time=70 [start=Tue Nov 24 12:25:30 2026] [stop=Tue Nov 24 12:26:40 2026] id=77")
+    dnat = ("ipv4     2 udp      17 29 src=198.51.100.20 dst=203.0.113.7 sport=999 dport=21116 packets=1 bytes=100 "
+            "src=@@LAN_PREFIX@@.5 dst=198.51.100.20 sport=21116 dport=999 packets=1 bytes=50 mark=0 delta-time=1 use=1 id=78")
+    dns = ("ipv4     2 udp      17 29 src=@@LAN_PREFIX@@.68 dst=8.8.4.4 sport=999 dport=53 packets=1 bytes=100 "
+           "src=@@LAN_PREFIX@@.1 dst=@@LAN_PREFIX@@.68 sport=53 dport=999 packets=1 bytes=50 mark=0 delta-time=1 use=1 id=79")
+    gre = ("ipv4     2 gre      47 29 src=@@LAN_PREFIX@@.45 dst=198.51.100.9 srckey=0x0 dstkey=0x0 packets=1 bytes=10 "
+           "[UNREPLIED] src=198.51.100.9 dst=203.0.113.7 srckey=0x0 dstkey=0x0 packets=0 bytes=0 mark=0 delta-time=3 "
+           "use=1 id=80")
+    clock = [1000000000.0]
+    with tempfile.TemporaryDirectory() as d:
+        tr = Tracker(Path(d), now=lambda: clock[0])
+        tr.wan = {"203.0.113.7"}
+        tr.tick([live.format(100, 1000, 10), dnat, dns, gre])
+        assert len(tr.mins) == 3, tr.mins                       # the redirected DNS query is left out
+        by = {m["remote"] + m["proto"]: m for m in tr.mins}
+        assert by["198.51.100.9tcp"]["up"] == 100 and by["198.51.100.9tcp"]["down"] == 1000
+        i = by["198.51.100.20udp"]
+        assert (i["dir"], i["dev"], i["port"], i["up"], i["down"]) == ("in", "@@LAN_PREFIX@@.5", 21116, 50, 100)
+        assert by["198.51.100.9gre"]["port"] is None
+        clock[0] += 60
+        tr.tick([live.format(400, 5000, 70)])
+        m = [x for x in tr.mins if x["remote"] == "198.51.100.9" and x["proto"] == "tcp"][-1]
+        assert (m["up"], m["down"], m["conns"]) == (300, 4000, 0), m
+        tr.update(parse(gone), final=True)
+        f = tr.flows[-1]
+        assert (f["up"], f["down"], f["port"]) == (900, 9000, 443), f
+        tr2 = Tracker(Path(d), now=lambda: clock[0])
+        tr2.wan = {"203.0.113.7"}
+        tr2.tick([live.format(400, 5000, 7200)])                # open before the daemon started: no spike
+        assert not tr2.mins, tr2.mins
+        tr2.ticks = ROTATE_TICKS - 1
+        tr2.tick([live.format(500, 5000, 7260)])
+        assert list(Path(d).glob("min-*.ndjson")) and json.loads((Path(d) / "active.json").read_text())["up"] == 500
+    print("fw-flowd selftest ok")
+
+
+if __name__ == "__main__":
+    selftest() if sys.argv[1:] == ["selftest"] else main()

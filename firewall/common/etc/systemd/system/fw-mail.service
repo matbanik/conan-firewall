@@ -1,0 +1,36 @@
+[Unit]
+Description=Send the messages in the mail spool
+After=network-online.target
+# Until tools/store-mail-secret.ps1 has stored the login, messages wait in the spool.
+ConditionPathExists=/etc/credstore.encrypted/fw-mail
+
+[Service]
+Type=oneshot
+User=fwmail
+Group=fwspool
+UMask=0077
+LoadCredentialEncrypted=fw-mail:/etc/credstore.encrypted/fw-mail
+ExecStart=/usr/local/sbin/fw-mail send
+TimeoutStartSec=5min
+Environment=PYTHONDONTWRITEBYTECODE=1
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK
+ReadWritePaths=/var/spool/fw-mail
+ProtectProc=invisible
+ProtectKernelTunables=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native

@@ -1,0 +1,85 @@
+#!/usr/bin/python3
+"""fw-mail: the only program on the firewall that can send email.
+
+  fw-mail queue SUBJECT   (body on stdin) put a message in the spool. Any user in group fwspool. Needs no password.
+  fw-mail send            send what is in the spool. Runs as user fwmail from fw-mail.service.
+
+The sender, the recipient and the app password are in one encrypted systemd credential (fw-mail-setup), which only
+fw-mail.service can read while it runs. The recipient is fixed there: a message cannot choose where it goes.
+Messages are plain text only, so a brief that quotes hostile log data cannot carry links or images as HTML.
+"""
+import json
+import os
+import smtplib
+import socket
+import ssl
+import sys
+import time
+import uuid
+from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
+from pathlib import Path
+
+SPOOL = Path(os.environ.get("FW_MAIL_SPOOL") or "/var/spool/fw-mail")
+MAX_AGE_S = 3 * 86400
+MAX_BODY = 200_000
+
+
+def queue(subject):
+    body = sys.stdin.buffer.read(MAX_BODY + 1).decode("utf-8", "replace")
+    if len(body) > MAX_BODY:
+        body = body[:MAX_BODY] + "\n[cut]\n"
+    name = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    tmp = SPOOL / f".{name}"
+    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640), "w", encoding="utf-8") as f:
+        json.dump({"subject": subject, "body": body, "time": time.time()}, f)
+    os.chmod(tmp, 0o640)
+    tmp.replace(SPOOL / f"{name}.json")
+
+
+def send():
+    waiting = sorted(SPOOL.glob("*.json"))
+    if not waiting:
+        return 0
+    cred = json.loads((Path(os.environ["CREDENTIALS_DIRECTORY"]) / "fw-mail").read_text())
+    failed, sent = 0, 0
+    ctx = ssl.create_default_context()
+    try:
+        with smtplib.SMTP_SSL(cred.get("host", "smtp.gmail.com"), int(cred.get("port", 465)), timeout=40, context=ctx) as s:
+            s.login(cred["user"], cred["password"])
+            for path in waiting:
+                try:
+                    m = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    path.rename(path.with_suffix(".bad"))
+                    continue
+                msg = EmailMessage()
+                msg["From"], msg["To"] = cred["from"], cred["to"]
+                msg["Subject"] = f"[{socket.gethostname()}] " + " ".join(str(m.get("subject", "")).split())[:150]
+                msg["Date"], msg["Message-ID"] = formatdate(m.get("time"), localtime=True), make_msgid(domain="firewall.invalid")
+                msg.set_content(str(m.get("body", "")))
+                s.send_message(msg)
+                path.unlink()
+                sent += 1
+    except smtplib.SMTPAuthenticationError as e:
+        # The server's text is left out: it can repeat the account name.
+        print(f"login refused ({e.smtp_code}); store a new app password with store-mail-secret.ps1", file=sys.stderr)
+        failed = 1
+    except (OSError, smtplib.SMTPException) as e:
+        print(f"send failed: {type(e).__name__}", file=sys.stderr)
+        failed = 1
+    for path in SPOOL.glob("*.json"):
+        if path.stat().st_mtime < time.time() - MAX_AGE_S:
+            path.unlink()
+            print(f"dropped {path.name}: not sent for 3 days", file=sys.stderr)
+    print(f"sent {sent}")
+    return failed
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["queue"] and len(sys.argv) == 3:
+        queue(sys.argv[2])
+    elif sys.argv[1:] == ["send"]:
+        sys.exit(send())
+    else:
+        sys.exit("usage: fw-mail queue SUBJECT | fw-mail send")

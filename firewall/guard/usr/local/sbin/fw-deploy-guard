@@ -1,0 +1,18 @@
+#!/bin/sh
+# Runs at boot when /var/lib/fw-deploy/pending exists. Unless fw-deploy-confirm removes the marker
+# within the set minutes, it puts the previous configuration back and reboots (fw-deploy-revert).
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+M=/var/lib/fw-deploy/pending
+[ -f "$M" ] || exit 0
+backup=$(sed -n 's/^backup=//p' "$M")
+mins=$(sed -n 's/^minutes=//p' "$M")
+case "$mins" in '' | *[!0-9]*) mins=15 ;; esac
+logger -t fw-deploy -p daemon.warning "deploy from $backup is not confirmed; reverting in $mins min unless fw-deploy-confirm runs"
+i=0
+while [ $i -lt $((mins * 6)) ]; do
+	[ -f "$M" ] || { logger -t fw-deploy "deploy confirmed; guard stops"; exit 0; }
+	sleep 10
+	i=$((i + 1))
+done
+[ -f "$M" ] || exit 0
+exec /usr/local/sbin/fw-deploy-revert

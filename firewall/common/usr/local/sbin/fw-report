@@ -1,0 +1,157 @@
+#!/usr/bin/python3
+"""fw-report: the daily database report (last 24 hours) in /var/lib/fwdb/reports/YYYY-MM-DD.md. Runs as user fwdb.
+
+The report is plain SQL output, the same every day. @@ADMIN_HOST@@'s backup pull takes it, and the daily brief is written from it.
+"""
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(os.environ.get("FWDB_ROOT") or "/var/lib/fwdb")
+DB, OUT = ROOT / "fwlog.duckdb", ROOT / "reports"
+UPDATES = OUT / "updates.txt"
+KEEP_DAYS = 400
+DAY = "localtimestamp - INTERVAL 24 HOUR"
+DEV = "coalesce((SELECT device FROM device_name d WHERE d.ip = {0}), '-')"
+
+SECTIONS = [
+    ("Volume", f"""
+SELECT (SELECT count(*) FROM drops WHERE ts >= {DAY} AND prefix = 'DROP_WAN') AS wan_drops_logged,
+  (SELECT count(DISTINCT src) FROM drops WHERE ts >= {DAY} AND prefix = 'DROP_WAN') AS wan_sources,
+  (SELECT sum(n)::BIGINT FROM dns_hour WHERE hour >= {DAY}) AS dns_questions,
+  (SELECT round(100.0 * sum(blocked) / nullif(sum(n), 0), 1) FROM dns_hour WHERE hour >= {DAY}) AS dns_blocked_pct,
+  (SELECT count(*) FROM alert WHERE ts >= {DAY}) AS ids_alerts,
+  (SELECT mb(sum(down)) FROM flow_hour WHERE hour >= {DAY} AND dir IN ('out', 'in')) AS down_mb,
+  (SELECT mb(sum(up)) FROM flow_hour WHERE hour >= {DAY} AND dir IN ('out', 'in')) AS up_mb,
+  (SELECT count(DISTINCT dev) FROM flow_hour WHERE hour >= {DAY} AND is_lan(dev)) AS active_devices"""),
+    ("Inbound from the internet (there should be none except an approved forward)", f"""
+SELECT severity, kind, dev, {DEV.format('signal.dev')} AS device, target, detail, n, mb(bytes) AS mb, first_seen, last_seen
+FROM signal WHERE kind IN ('inbound', 'inbound-firewall') AND last_seen >= {DAY}
+ORDER BY severity = 'info', bytes DESC NULLS LAST LIMIT 30"""),
+    ("Known hosts (the owner's list: a label, not a permission)", f"""
+SELECT k.ip, k.name, t.dir, t.dev, t.device, t.ports, t.down_mb, t.up_mb, t.conns,
+  (SELECT count(*) FROM drops WHERE src = k.ip AND ts >= {DAY}) AS refused, k.relation, k.ports AS expected_inbound, k.note
+FROM known_host k LEFT JOIN (SELECT remote, dir, dev, any_value(device) AS device,
+  CASE WHEN count(DISTINCT port) > 6 THEN count(DISTINCT port) || ' ports' ELSE string_agg(DISTINCT proto || '/' || coalesce(port::VARCHAR, '-'), ' ') END AS ports,
+  mb(sum(down)) AS down_mb, mb(sum(up)) AS up_mb, sum(conns)::BIGINT AS conns FROM traffic WHERE hour >= {DAY} GROUP BY 1, 2, 3) t ON t.remote = k.ip
+ORDER BY k.name, t.down_mb + t.up_mb DESC LIMIT 40"""),
+    ("Signals: high and medium", f"""
+SELECT severity, kind, dev, {DEV.format('signal.dev')} AS device, target, detail, n, mb(bytes) AS mb, last_seen
+FROM signal WHERE severity IN ('high', 'medium') AND kind NOT IN ('inbound', 'inbound-firewall') AND last_seen >= {DAY}
+ORDER BY severity, kind, n DESC LIMIT 80"""),
+    ("Signals: low (hole punching, tunnels, long connections, encrypted DNS)", f"""
+SELECT kind, dev, {DEV.format('signal.dev')} AS device, target, detail, n, mb(bytes) AS mb, last_seen
+FROM signal WHERE severity = 'low' AND last_seen >= {DAY} ORDER BY kind, n DESC LIMIT 60"""),
+    ("Signals seen today for the first time in 30 days", f"""
+SELECT kind, dev, {DEV.format('s.dev')} AS device, target, severity, n FROM signal s
+WHERE last_seen >= {DAY} AND kind NOT IN ('beacon') AND NOT EXISTS (SELECT 1 FROM signal o WHERE o.kind = s.kind AND o.dev = s.dev
+  AND o.target = s.target AND o.last_seen < {DAY} AND o.day >= current_date - 30)
+  AND (SELECT min(day) FROM signal) < current_date - 1
+ORDER BY severity, kind, n DESC LIMIT 60"""),
+    ("Telemetry by app (DNS questions)", f"""
+SELECT app, count(DISTINCT dev) AS devices, sum(n)::BIGINT AS questions, sum(blocked)::BIGINT AS blocked, string_agg(DISTINCT dev, ' ') AS who
+FROM dns_hour WHERE cat = 'telemetry' AND hour >= {DAY} GROUP BY 1 ORDER BY questions DESC LIMIT 30"""),
+    ("Top talkers", f"""
+SELECT dev, any_value(device) AS device, mb(sum(down)) AS down_mb, mb(sum(up)) AS up_mb, sum(conns)::BIGINT AS connections,
+  count(DISTINCT remote) AS remotes, arg_max(service, down + up) AS biggest_service
+FROM traffic WHERE hour >= {DAY} AND dir IN ('out', 'in') GROUP BY 1 ORDER BY sum(down) + sum(up) DESC LIMIT 25"""),
+    ("Top services per device", f"""
+SELECT * FROM (SELECT dev, any_value(device) AS device, service, proto || '/' || coalesce(port::VARCHAR, '-') AS port, mb(sum(down)) AS down_mb,
+  mb(sum(up)) AS up_mb, any_value(org) AS network FROM traffic WHERE hour >= {DAY} AND dir IN ('out', 'in') GROUP BY dev, service, proto, port
+  QUALIFY row_number() OVER (PARTITION BY dev ORDER BY sum(down) + sum(up) DESC) <= 4)
+WHERE down_mb + up_mb >= 5 ORDER BY dev, down_mb + up_mb DESC LIMIT 100"""),
+    ("Traffic spikes (5 minutes over 4 times the day's normal busy level, with what caused them)", f"""
+WITH b AS (SELECT time_bucket(INTERVAL 5 MINUTE, ts) AS t, sum(up + down) AS bytes FROM flow_min WHERE ts >= {DAY} AND dir IN ('out', 'in') GROUP BY 1),
+ q AS (SELECT greatest(4 * quantile_cont(bytes, 0.75), 50 * 1048576) AS lim FROM b),
+ sp AS (SELECT t, bytes FROM b, q WHERE bytes > lim ORDER BY bytes DESC LIMIT 15),
+ x AS (SELECT sp.t, sp.bytes AS total, m.dev, any_value(m.device) AS device, m.service, m.port, sum(m.up) AS up, sum(m.down) AS down
+   FROM sp JOIN traffic_min m ON time_bucket(INTERVAL 5 MINUTE, m.ts) = sp.t WHERE m.dir IN ('out', 'in') GROUP BY sp.t, sp.bytes, m.dev, m.service, m.port
+   QUALIFY row_number() OVER (PARTITION BY sp.t ORDER BY sum(m.up + m.down) DESC) <= 2)
+SELECT t AS five_minutes_from, mb(total) AS total_mb, round(total * 8 / 300e6, 1) AS mbit_s, dev, device, service, port, mb(down) AS down_mb, mb(up) AS up_mb
+FROM x ORDER BY t, down + up DESC"""),
+    ("Devices well above their own 7-day average", f"""
+WITH d AS (SELECT dev, sum(up + down) AS bytes FROM flow_hour WHERE hour >= {DAY} AND dir IN ('out', 'in') GROUP BY 1),
+ a AS (SELECT dev, sum(up + down) / count(DISTINCT hour::DATE) AS avg_day, count(DISTINCT hour::DATE) AS days FROM flow_hour
+   WHERE hour < {DAY} AND hour >= localtimestamp - INTERVAL 8 DAY AND dir IN ('out', 'in') GROUP BY 1)
+SELECT dev, {DEV.format('dev')} AS device, mb(bytes) AS today_mb, mb(avg_day) AS usual_mb, round(bytes / nullif(avg_day, 0), 1) AS times, days
+FROM d JOIN a USING (dev) WHERE days >= 2 AND bytes > 3 * avg_day AND bytes > 500 * 1048576 ORDER BY times DESC LIMIT 20"""),
+    ("Countries and networks outside the US by traffic", f"""
+SELECT country, org, count(DISTINCT dev) AS devices, mb(sum(up)) AS up_mb, mb(sum(down)) AS down_mb, sum(conns)::BIGINT AS connections
+FROM traffic WHERE hour >= {DAY} AND dir = 'out' AND country IS NOT NULL AND country NOT IN ('US', 'None') GROUP BY 1, 2
+ORDER BY sum(up + down) DESC LIMIT 20"""),
+    ("DNS: noisiest devices", f"""
+SELECT dev, {DEV.format('dev')} AS device, sum(n)::BIGINT AS questions, sum(blocked)::BIGINT AS blocked, sum(nxdomain)::BIGINT AS not_found,
+  count(DISTINCT name) AS names, arg_max(name, n) AS busiest_name FROM dns_hour WHERE hour >= {DAY} GROUP BY 1 ORDER BY questions DESC LIMIT 15"""),
+    ("DNS: long or random-looking names (DNS tunneling check)", f"""
+SELECT dev, site(name) AS domain, count(DISTINCT name) AS names, max(length(name)) AS longest, sum(n)::BIGINT AS questions
+FROM dns_hour WHERE hour >= {DAY} AND name NOT LIKE '%.arpa' GROUP BY 1, 2
+HAVING count(DISTINCT name) > 300 OR (max(length(name)) > 100 AND count(DISTINCT name) > 20) ORDER BY names DESC LIMIT 15"""),
+    ("WAN drops: top sources", f"""
+SELECT src, k.name AS known_host, r.country, r.org, count(*) AS n, count(DISTINCT dport) AS ports, mode(dport) AS main_port
+FROM drops LEFT JOIN remote_net r ON r.ip = src LEFT JOIN known_host k ON k.ip = src
+WHERE ts >= {DAY} AND prefix = 'DROP_WAN' GROUP BY 1, 2, 3, 4 ORDER BY n DESC LIMIT 12"""),
+    ("WAN drops: top ports", f"""
+SELECT proto, dport, count(*) AS n, count(DISTINCT src) AS sources FROM drops WHERE ts >= {DAY} AND prefix = 'DROP_WAN' GROUP BY 1, 2 ORDER BY n DESC LIMIT 12"""),
+    ("IDS alerts by rule", f"""
+SELECT signature, severity, count(*) AS n, count(DISTINCT src) AS sources, any_value(src || ' -> ' || dst || ':' || dport) AS example
+FROM alert WHERE ts >= {DAY} GROUP BY 1, 2 ORDER BY severity, n DESC LIMIT 25"""),
+    ("Devices first seen in the last 24 hours", f"""
+SELECT mac, ip, hostname, friendly, vendor, random_mac, first_seen FROM device WHERE first_seen >= {DAY}
+AND first_seen > (SELECT min(first_seen) + INTERVAL 1 DAY FROM device) ORDER BY first_seen LIMIT 30"""),
+    ("Firewall events", f"""
+SELECT host, tag, regexp_replace(msg, '[0-9]+', 'N', 'g')[:110] AS message, count(*) AS n, max(ts) AS last FROM system_event WHERE ts >= {DAY}
+GROUP BY 1, 2, 3 ORDER BY n DESC LIMIT 30"""),
+    ("Database", """
+SELECT (SELECT count(*) FROM flow_min) AS flow_min, (SELECT count(*) FROM flow_hour) AS flow_hour, (SELECT count(*) FROM flow) AS flow, (SELECT count(*) FROM dns_hour) AS dns_hour,
+  (SELECT count(*) FROM drops) AS drops, (SELECT count(*) FROM alert) AS alert, (SELECT count(*) FROM device) AS device,
+  (SELECT count(*) FROM legacy_event) AS legacy_event, (SELECT max(ts) FROM flow_min) AS newest_minute"""),
+    ("Database size, archive and backup (fw-ingest keeps the database under 85 GB, fw-archive its folder under 15 GB)", """
+SELECT (SELECT round(used_blocks * block_size / 1e9, 2) FROM pragma_database_size()) AS database_gb,
+  (SELECT round(sum(size) / 1e9, 2) FROM read_blob('/var/lib/fwdb/archive/*.tar')) AS archive_gb,
+  (SELECT max(parse_filename(file)) FROM glob('/var/lib/fwdb/archive/fwdb-2*.tar')) AS newest_week_archived,
+  (SELECT max(ts) FROM system_event WHERE tag = 'fw-backup' AND msg LIKE 'export sent%') AS config_backup_taken,
+  (SELECT max(ts) FROM system_event WHERE tag = 'fw-backup' AND msg LIKE 'archive sent%') AS weekly_archive_taken"""),
+]
+
+
+def query(sql):
+    for _ in range(60):
+        r = subprocess.run(["duckdb", "-readonly", "-markdown", "-bail", str(DB)], input=sql + ";", capture_output=True, text=True)
+        if r.returncode == 0 or "lock" not in r.stderr.lower():
+            break
+        time.sleep(5)
+    return (r.stdout.strip() or "(none)", True) if r.returncode == 0 else ("QUERY FAILED: " + r.stderr.strip()[:300], False)
+
+
+def updates():
+    """The text fw-updates wrote at the start of this run (fw-report.service, ExecStartPre)."""
+    try:
+        if UPDATES.stat().st_mtime < time.time() - 3 * 3600:
+            return "MISSING: updates.txt is older than 3 hours, so fw-updates did not run (journalctl -u fw-report)."
+        return "```\n" + UPDATES.read_text(encoding="utf-8").strip() + "\n```"
+    except OSError as e:
+        return f"MISSING: fw-updates wrote nothing ({e.strerror})."
+
+
+def main():
+    OUT.mkdir(parents=True, exist_ok=True)
+    out, good = [f"# Firewall database report, 24 hours to {time.strftime('%Y-%m-%d %H:%M %Z')}", ""], True
+    for title, sql in SECTIONS:
+        text, ok = query(sql)
+        good &= ok
+        out += [f"## {title}", "", text, ""]
+    out += ["## Updates (fw-updates, run as root just before this report)", "", updates(), ""]
+    path = OUT / time.strftime("%Y-%m-%d.md")
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text("\n".join(out), encoding="utf-8")
+    tmp.replace(path)
+    for old in OUT.glob("*.md"):
+        if old.stat().st_mtime < time.time() - KEEP_DAYS * 86400:
+            old.unlink()
+    print(path)
+    sys.exit(0 if good else 1)
+
+
+main()

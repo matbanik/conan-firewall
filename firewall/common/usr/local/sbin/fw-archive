@@ -1,0 +1,153 @@
+#!/usr/bin/python3
+"""fw-archive: the rows of each finished week, as Parquet files in one tar, in /var/lib/fwdb/archive. Runs as user fwdb.
+
+@@ADMIN_HOST@@'s weekly task takes the new tars and keeps them for ever, so history stays after fw-ingest removes old rows here.
+Differential: each row is in one week only. Of the devices and names, an archive holds the ones seen in its week (or later,
+when it was made late); known_host is whole. To join, take the newest row of each key from all the archives.
+A week is Monday to Sunday, local time. It is archived on the Tuesday after, when its last rows are in.
+
+  fw-archive                  the finished weeks that are newer than the newest archive, and once the old router's log
+  fw-archive 2026-W48 DIR     one week into DIR (a test, or a week that is still running)
+  fw-archive selftest
+Read one back: tar -xf fwdb-2026-W48.tar; duckdb -c "SELECT * FROM 'flow.parquet' LIMIT 5"
+"""
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+from pathlib import Path
+
+ROOT = Path(os.environ.get("FWDB_ROOT") or "/var/lib/fwdb")
+SHARE = Path(os.environ.get("FWDB_SHARE") or "/usr/local/share/fwdb")
+DB, OUT = ROOT / "fwlog.duckdb", ROOT / "archive"
+KEEP_BYTES = 15 * 10**9     # on the firewall; with fw-ingest's limit this keeps /var/lib/fwdb under 100 GB
+# flow is cut on its end time: a connection is written when it ends.
+WEEKLY = {"flow_min": "ts", "flow_hour": "hour", "flow": '"end"', "dns_hour": "hour", "service_hour": "hour", "alert": "ts",
+          "drops": "ts", "system_event": "ts", "signal": "day"}
+SEEN = ["device", "device_ip", "remote_name"]
+
+
+def duck(sql):
+    for _ in range(60):
+        r = subprocess.run(["duckdb", "-bail", "-json", "-readonly", str(DB)], input=sql, capture_output=True, text=True)
+        if r.returncode == 0 or "lock" not in r.stderr.lower():
+            break
+        time.sleep(5)
+    if r.returncode:
+        raise SystemExit("duckdb: " + r.stderr.strip()[:1000])
+    return r.stdout
+
+
+def bounds(week):
+    m = re.fullmatch(r"(\d{4})-W(\d{2})", week)
+    if not m:
+        raise SystemExit(f"not a week: {week}")
+    d = dt.date.fromisocalendar(int(m[1]), int(m[2]), 1)
+    return d, d + dt.timedelta(days=7)
+
+
+def name_of(day):
+    y, w, _ = day.isocalendar()
+    return f"{y}-W{w:02d}"
+
+
+def finished_weeks(oldest, newest_done, today):
+    """Weeks from the oldest row, after the newest archive, that ended at least one full day ago."""
+    d, out = oldest - dt.timedelta(days=oldest.weekday()), []
+    while d + dt.timedelta(days=8) <= today:
+        if newest_done is None or name_of(d) > newest_done:
+            out.append(name_of(d))
+        d += dt.timedelta(days=7)
+    return out
+
+
+def sha(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while b := f.read(1 << 20):
+            h.update(b)
+    return h.hexdigest()
+
+
+def build(label, selects, out):
+    """selects: {table: SQL}. Writes fwdb-LABEL.tar and its checksum file; the row counts are read back from the Parquet."""
+    out.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=out, prefix=".part-") as t:
+        t = Path(t)
+        sql = ["BEGIN;"]
+        for table, q in selects.items():
+            sql.append(f"COPY ({q}) TO '{t / (table + '.parquet')}' (FORMAT parquet, COMPRESSION zstd);")
+        sql.append("SELECT " + ", ".join(f"(SELECT count(*) FROM ({q})) AS {n}" for n, q in selects.items()) + ";")
+        want = json.loads(duck("\n".join(sql) + "\nCOMMIT;").strip().splitlines()[-1].strip("[]"))
+        got = json.loads(duck("SELECT " + ", ".join(f"(SELECT count(*) FROM '{t / (n + '.parquet')}') AS {n}" for n in selects) + ";"))[0]
+        if want != got:
+            raise SystemExit(f"{label}: row counts differ: {want} {got}")
+        (t / "meta.json").write_text(json.dumps({"archive": label, "made": time.strftime("%Y-%m-%d %H:%M:%S %Z"), "rows": got}, indent=1))
+        (t / "schema.sql").write_text((SHARE / "schema.sql").read_text())
+        files = sorted(p for p in t.iterdir())
+        (t / "SHA256SUMS").write_text("".join(f"{sha(p)}  {p.name}\n" for p in files))
+        part, final = t / "out.tar", out / f"fwdb-{label}.tar"
+        with tarfile.open(part, "w") as tar:
+            for p in files + [t / "SHA256SUMS"]:
+                tar.add(p, arcname=p.name)
+        (out / f"{final.name}.sha256").write_text(f"{sha(part)}  {final.name}\n")
+        part.replace(final)
+    print(f"{final.name} {final.stat().st_size} bytes, rows {got}")
+
+
+def week(label, out):
+    a, b = bounds(label)
+    sel = {t: f"SELECT * FROM {t} WHERE {c} >= DATE '{a}' AND {c} < DATE '{b}'" for t, c in WEEKLY.items()}
+    sel.update({t: f"SELECT * FROM {t} WHERE last_seen IS NULL OR last_seen >= DATE '{a}'" for t in SEEN})
+    ips = [f"SELECT {c} FROM {t} WHERE {w} >= DATE '{a}' AND {w} < DATE '{b}'" for t, c, w in
+           (("flow_hour", "remote", "hour"), ("service_hour", "remote", "hour"), ("alert", "src", "ts"), ("alert", "dst", "ts"),
+            ("drops", "src", "ts"), ("drops", "dst", "ts"))]
+    sel["remote_net"] = f"SELECT * FROM remote_net WHERE ip IN ({' UNION '.join(ips)})"
+    sel["known_host"] = "SELECT * FROM known_host"
+    build(label, sel, out)
+
+
+def run():
+    OUT.mkdir(parents=True, exist_ok=True)
+    if not (OUT / "legacy.done").exists():
+        build("legacy", {"legacy_event": "SELECT * FROM legacy_event ORDER BY id"}, OUT)
+        (OUT / "legacy.done").touch()
+    oldest = json.loads(duck("SELECT least((SELECT min(ts) FROM flow_min), (SELECT min(hour) FROM flow_hour))::DATE::VARCHAR AS d;"))[0]["d"]
+    if not oldest:
+        print("no rows")
+        return
+    done = sorted(p.name[5:13] for p in OUT.glob("fwdb-????-W??.tar"))
+    for w in finished_weeks(dt.date.fromisoformat(oldest), done[-1] if done else None, dt.date.today()):
+        week(w, OUT)
+    # Oldest first. @@ADMIN_HOST@@ has them long before this limit; the newest one always stays.
+    tars = sorted(OUT.glob("fwdb-*.tar"), key=lambda p: p.stat().st_mtime)
+    while len(tars) > 1 and sum(p.stat().st_size for p in tars) > KEEP_BYTES:
+        p = tars.pop(0)
+        print(f"removed {p.name}: the archive folder is over its limit")
+        p.unlink()
+        (OUT / f"{p.name}.sha256").unlink(missing_ok=True)
+
+
+def selftest():
+    D = dt.date
+    assert bounds("2026-W48") == (D(2026, 11, 23), D(2026, 11, 30))
+    assert finished_weeks(D(2026, 11, 24), None, D(2026, 11, 30)) == []
+    assert finished_weeks(D(2026, 11, 24), None, D(2026, 12, 1)) == ["2026-W48"]
+    assert finished_weeks(D(2026, 11, 24), "2026-W48", D(2026, 12, 7)) == []
+    assert finished_weeks(D(2026, 12, 15), "2026-W51", D(2027, 1, 12)) == ["2026-W52", "2026-W53", "2027-W01"]
+    print("fw-archive selftest ok")
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["selftest"]:
+        selftest()
+    elif len(sys.argv) == 3:
+        week(sys.argv[1], Path(sys.argv[2]))
+    else:
+        run()

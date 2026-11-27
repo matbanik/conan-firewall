@@ -1,0 +1,13 @@
+# Settings for /usr/local/sbin/fw-dnsbl (timer: fw-dnsbl.timer, twice a day).
+# After a change: sudo systemctl start fw-dnsbl.service
+
+# 1 = block. 0 = empty the zones at the next update (the allowlist and the Firefox setting stay).
+DNSBL_ENABLE=1
+
+# One list per line: name|url. Each name needs an rpz: zone "rpz.<name>" in
+# /etc/unbound/unbound.conf.d/firewall-rpz.conf with zonefile /var/lib/unbound/rpz/<name>.rpz.
+DNSBL_LISTS="hagezi-pro|https://raw.githubusercontent.com/hagezi/dns-blocklists/main/rpz/pro.txt
+hagezi-tif|https://raw.githubusercontent.com/hagezi/dns-blocklists/main/rpz/tif.medium.txt"
+
+# A new copy with fewer names than this is not used (pro has about 480,000, tif.medium about 700,000).
+DNSBL_MIN=10000

@@ -1,0 +1,17 @@
+#!/bin/sh
+# Keep the ruleset applied by fw-apply: cancel the rollback, save it as
+# /etc/nftables.conf and commit /etc to git.
+#   fw-confirm "reason for the change"
+set -eu
+[ "$(id -u)" = 0 ] || { echo "fw-confirm: run as root" >&2; exit 1; }
+state=/var/lib/fw-apply
+reason=${1:-no reason given}
+
+systemctl is-active -q fw-rollback.timer || { echo "fw-confirm: nothing pending (already confirmed or rolled back)" >&2; exit 1; }
+systemctl stop fw-rollback.timer
+cand=$(cat "$state/pending")
+[ "$cand" -ef /etc/nftables.conf ] || install -m 0644 "$cand" /etc/nftables.conf
+rm -f "$state/pending"
+etckeeper commit "fw-confirm: $reason" >/dev/null 2>&1 || true
+logger -t fw-confirm "kept $cand: $reason"
+echo "Confirmed. $cand is now /etc/nftables.conf"

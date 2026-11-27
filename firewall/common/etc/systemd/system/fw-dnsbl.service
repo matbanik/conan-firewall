@@ -1,0 +1,9 @@
+[Unit]
+Description=Update the DNS blocklists in unbound (settings in /etc/default/fw-dnsbl)
+After=network-online.target unbound.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Nice=10
+ExecStart=/usr/local/sbin/fw-dnsbl update

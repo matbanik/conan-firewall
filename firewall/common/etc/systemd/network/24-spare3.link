@@ -1,0 +1,6 @@
+# i350 PCI 0000:01:00.3 (was enp1s0f3)
+[Match]
+PermanentMACAddress=@@SPARE3_MAC@@
+
+[Link]
+Name=spare3

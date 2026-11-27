@@ -1,0 +1,20 @@
+# Production interfaces. Names come from /etc/systemd/network/*.link (wan0/trunk0 = i350 ports 0/1, mgmt0 = onboard).
+source /etc/network/interfaces.d/*
+
+auto lo
+iface lo inet loopback
+
+# Rescue port. A laptop gets 10.255.255.2 by DHCP or set it by hand; then: ssh fwadmin@10.255.255.1
+auto mgmt0
+iface mgmt0 inet static
+	address 10.255.255.1/30
+
+# The provider's ONT. Uses the ASUS WAN MAC so the provider keeps the same lease and IP (ASUS wan0_hwaddr @@WAN_CLONE_MAC_UC@@).
+auto wan0
+iface wan0 inet dhcp
+	hwaddress ether @@WAN_CLONE_MAC@@
+
+# To the switch. Untagged = house LAN, same gateway address the ASUS had.
+auto trunk0
+iface trunk0 inet static
+	address @@LAN_PREFIX@@.1/24

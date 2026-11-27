@@ -1,0 +1,25 @@
+#!/bin/sh
+# Updates the Suricata rules from the sources in /etc/default/fw-suricata-update, then reloads Suricata.
+# suricata-update tests the new rules with suricata -T before it writes them. Log tag: fw-suricata-update.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+CONF=${FW_SURICATA_CONF:-/etc/default/fw-suricata-update}
+[ -r "$CONF" ] && . "$CONF"
+SOURCES=${SURICATA_SOURCES:-et/open}
+log() { logger -t fw-suricata-update -p "daemon.$1" -- "$2"; }
+
+suricata-update update-sources >/dev/null 2>&1 || log warning "update-sources failed; using the cached index"
+for s in $SOURCES; do
+	suricata-update enable-source "$s" >/dev/null 2>&1 || log warning "could not enable source $s"
+done
+# Sources that are not in the list any more are turned off.
+for s in $(suricata-update list-enabled-sources 2>/dev/null | sed -n 's/^ *- //p'); do
+	case " $SOURCES " in *" $s "*) ;; *) suricata-update disable-source "$s" >/dev/null 2>&1 && log info "disabled source $s" ;; esac
+done
+if suricata-update; then
+	n=$(grep -c -v -E '^[[:space:]]*(#|$)' /var/lib/suricata/rules/suricata.rules 2>/dev/null || echo 0)
+	log info "rules updated: $n rules from $SOURCES"
+	systemctl try-reload-or-restart suricata.service
+else
+	log err "suricata-update failed; the old rules stay"
+	exit 1
+fi

@@ -1,0 +1,28 @@
+; Allowlist for the DNS blocklists (zone rpz.allow, loaded first). One name per line:
+;   example.com      CNAME rpz-passthru.     the name itself
+;   *.example.com    CNAME rpz-passthru.     all names under it
+; The firewall's own update and alert hosts are here, so a list error cannot stop the updates.
+$TTL 300
+@ SOA localhost. root.localhost. 1 3600 600 86400 300
+  NS localhost.
+
+deb.debian.org                CNAME rpz-passthru.
+security.debian.org           CNAME rpz-passthru.
+downloads.claude.ai           CNAME rpz-passthru.
+api.anthropic.com             CNAME rpz-passthru.
+github.com                    CNAME rpz-passthru.
+api.github.com                CNAME rpz-passthru.
+raw.githubusercontent.com     CNAME rpz-passthru.
+objects.githubusercontent.com CNAME rpz-passthru.
+release-assets.githubusercontent.com CNAME rpz-passthru.
+www.spamhaus.org              CNAME rpz-passthru.
+feodotracker.abuse.ch         CNAME rpz-passthru.
+urlhaus.abuse.ch              CNAME rpz-passthru.
+sslbl.abuse.ch                CNAME rpz-passthru.
+rules.emergingthreats.net     CNAME rpz-passthru.
+www.openinfosecfoundation.org CNAME rpz-passthru.
+feeds.dshield.org             CNAME rpz-passthru.
+www.ipdeny.com                CNAME rpz-passthru.
+dynv6.com                     CNAME rpz-passthru.
+ipv4.dynv6.com                CNAME rpz-passthru.
+smtp.gmail.com                CNAME rpz-passthru.

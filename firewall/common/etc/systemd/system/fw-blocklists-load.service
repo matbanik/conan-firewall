@@ -1,0 +1,14 @@
+[Unit]
+Description=Load the cached IP blocklists after nftables starts or reloads
+After=nftables.service
+PartOf=nftables.service
+ReloadPropagatedFrom=nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/fw-blocklists load
+ExecReload=/usr/local/sbin/fw-blocklists load
+
+[Install]
+WantedBy=nftables.service

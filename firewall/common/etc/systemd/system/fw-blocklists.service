@@ -1,0 +1,8 @@
+[Unit]
+Description=Update the IP blocklists in nftables (settings in /etc/default/fw-blocklists)
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/fw-blocklists update

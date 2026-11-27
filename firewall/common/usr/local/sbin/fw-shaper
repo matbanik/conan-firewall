@@ -1,0 +1,65 @@
+#!/bin/sh
+# CAKE traffic shaper on the WAN, against bufferbloat.
+#   fw-shaper start    apply /etc/default/fw-shaper (or remove the shaper when SHAPER_ENABLE is not 1)
+#   fw-shaper stop     remove the shaper; wan0 goes back to the kernel default qdisc
+#   fw-shaper status   show the qdiscs and their counters
+# Egress: CAKE on wan0. Ingress: wan0 traffic is redirected to ifb4wan0 and shaped there.
+# "nat" lets CAKE see the LAN host behind the masquerade, so each host gets a fair share.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+CONF=${FW_SHAPER_CONF:-/etc/default/fw-shaper}
+[ -r "$CONF" ] && . "$CONF"
+DEV=${SHAPER_DEV:-wan0}
+IFB=ifb4$DEV
+OPTS=${SHAPER_OPTS:-ethernet}
+
+log() { logger -t fw-shaper -p "daemon.$1" -- "$2"; if [ -t 2 ]; then echo "$2" >&2; fi; }
+
+num() { case "$1" in '' | *[!0-9]*) return 1 ;; *) [ "$1" -ge 1000 ] ;; esac; }
+
+stop() {
+	tc qdisc del dev "$DEV" root 2>/dev/null
+	tc qdisc del dev "$DEV" ingress 2>/dev/null
+	ip link del "$IFB" 2>/dev/null
+	return 0
+}
+
+case "${1:-}" in
+start)
+	if [ "${SHAPER_ENABLE:-0}" != 1 ]; then
+		stop
+		log info "SHAPER_ENABLE is not 1; no shaper on $DEV"
+		exit 0
+	fi
+	num "${EGRESS_KBIT:-}" || { log err "EGRESS_KBIT must be a number of kbit/s (1000 or more)"; exit 1; }
+	[ -z "${INGRESS_KBIT:-}" ] || num "$INGRESS_KBIT" || { log err "INGRESS_KBIT must be empty or a number of kbit/s"; exit 1; }
+	set -e
+	# shellcheck disable=SC2086
+	tc qdisc replace dev "$DEV" root cake bandwidth "${EGRESS_KBIT}kbit" $OPTS dual-srchost nat
+	tc qdisc del dev "$DEV" ingress 2>/dev/null || true
+	if [ -n "${INGRESS_KBIT:-}" ]; then
+		modprobe ifb numifbs=0 2>/dev/null || true
+		ip link show "$IFB" >/dev/null 2>&1 || ip link add "$IFB" type ifb
+		ip link set "$IFB" up
+		tc qdisc add dev "$DEV" handle ffff: ingress
+		tc filter add dev "$DEV" parent ffff: matchall action mirred egress redirect dev "$IFB"
+		# shellcheck disable=SC2086
+		tc qdisc replace dev "$IFB" root cake bandwidth "${INGRESS_KBIT}kbit" $OPTS dual-dsthost nat ingress
+	else
+		ip link del "$IFB" 2>/dev/null || true
+	fi
+	log info "CAKE on $DEV: egress ${EGRESS_KBIT}kbit, ingress ${INGRESS_KBIT:-not shaped}kbit, options $OPTS"
+	;;
+stop)
+	stop
+	log info "shaper removed from $DEV"
+	;;
+status)
+	tc -s qdisc show dev "$DEV"
+	ip link show "$IFB" >/dev/null 2>&1 && tc -s qdisc show dev "$IFB"
+	exit 0
+	;;
+*)
+	echo "usage: fw-shaper start|stop|status" >&2
+	exit 2
+	;;
+esac

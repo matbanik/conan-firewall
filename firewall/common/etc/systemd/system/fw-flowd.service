@@ -1,0 +1,39 @@
+[Unit]
+Description=Traffic per device, from the connection table, for the database
+After=network.target nftables.service
+
+[Service]
+User=fwdb
+Group=adm
+UMask=0027
+# Byte counters and start times for connections. Root, before the daemon starts.
+ExecStartPre=+/usr/sbin/sysctl -qw net.netfilter.nf_conntrack_acct=1 net.netfilter.nf_conntrack_timestamp=1
+ExecStart=/usr/local/sbin/fw-flowd
+Restart=always
+RestartSec=10
+Nice=5
+MemoryMax=1G
+Environment=PYTHONDONTWRITEBYTECODE=1
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+RestrictAddressFamilies=AF_NETLINK AF_UNIX AF_INET
+ReadWritePaths=/var/lib/fwdb
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

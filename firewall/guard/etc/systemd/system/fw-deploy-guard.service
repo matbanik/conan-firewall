@@ -1,0 +1,11 @@
+[Unit]
+Description=Revert an unconfirmed firewall deploy (see fw-deploy-confirm)
+ConditionPathExists=/var/lib/fw-deploy/pending
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/fw-deploy-guard
+
+[Install]
+WantedBy=multi-user.target

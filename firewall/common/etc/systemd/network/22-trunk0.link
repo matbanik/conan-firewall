@@ -1,0 +1,6 @@
+# i350 PCI 0000:01:00.1 (was enp1s0f1)
+[Match]
+PermanentMACAddress=@@TRUNK0_MAC@@
+
+[Link]
+Name=trunk0

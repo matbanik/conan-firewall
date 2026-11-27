@@ -1,0 +1,17 @@
+# Settings for /usr/local/sbin/fw-shaper (unit fw-shaper.service). Off until the line is measured.
+# After a change: sudo systemctl restart fw-shaper.service
+#
+# How to set it:
+#   1. With the shaper off, run a bufferbloat test (for example https://www.waveform.com/tools/bufferbloat)
+#      from a wired LAN host. Note the download and upload speeds and the latency under load.
+#   2. If the latency under load is low (grade A or A+), keep the shaper off. Shaping then costs speed for nothing.
+#   3. If not, set each rate to about 90% of the measured speed, set SHAPER_ENABLE=1, restart, and test again.
+
+SHAPER_ENABLE=0
+
+# Rates in kbit/s. Example for a 1 Gbit/s line: 900000. Empty INGRESS_KBIT = download not shaped.
+EGRESS_KBIT=
+INGRESS_KBIT=
+
+# Link overhead keyword for CAKE. "ethernet" fits a fibre ONT on Ethernet.
+SHAPER_OPTS="ethernet"

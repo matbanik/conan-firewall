@@ -1,0 +1,11 @@
+#!/bin/sh
+# pre-commit: refuse a commit that holds a real address, MAC address, mail address, DDNS name or key.
+# Installed by tools/hooks/install.sh. To commit anyway (do not, in a public fork): git commit --no-verify
+root=$(git rev-parse --show-toplevel) || exit 1
+for py in python3 python py; do
+    if command -v "$py" >/dev/null 2>&1 && "$py" -c "import sys" >/dev/null 2>&1; then
+        exec "$py" "$root/tools/scan-public.py" --staged
+    fi
+done
+echo "pre-commit: no Python found, so the scan did not run. Install Python 3.8 or newer." >&2
+exit 1

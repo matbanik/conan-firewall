@@ -1,0 +1,154 @@
+#!/bin/sh
+# IP blocklists for nftables (sets bl_v4, geo_drop_v4, geo_log_v4 in table inet fw).
+#   fw-blocklists update     download the sources, check them, load them, keep a cache
+#   fw-blocklists load       load the cached copy (fw-blocklists-load.service runs this after nftables starts)
+#   fw-blocklists selftest   check the parsers on sample lines (validate.sh runs this)
+# Settings: /etc/default/fw-blocklists. Log tag: fw-blocklists.
+#
+# A download that fails, or that has less than half the entries of the last good copy, is not used: the last
+# good copy of that source stays. Private, loopback, multicast and prefixes shorter than /8 are never loaded.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+umask 022
+CONF=${FW_BLOCKLISTS_CONF:-/etc/default/fw-blocklists}
+[ -r "$CONF" ] && . "$CONF"
+V=/var/lib/fw-blocklists
+SETS=$V/sets.nft
+
+log() { logger -t fw-blocklists -p "daemon.$1" -- "$2"; if [ -t 2 ]; then echo "$2" >&2; fi; }
+
+# stdin: one candidate per line (a.b.c.d or a.b.c.d/n). stdout: network addresses, one per line.
+clean() {
+	awk -F'[./]' '
+	function ok(x) { return x ~ /^[0-9]+$/ && x + 0 <= 255 }
+	{
+		sub(/\r$/, "")
+		if (NF != 4 && NF != 5) next
+		if (!ok($1) || !ok($2) || !ok($3) || !ok($4)) next
+		p = 32
+		if (NF == 5) { if ($5 !~ /^[0-9]+$/) next; p = $5 + 0 }
+		if (p < 8 || p > 32) next
+		a = $1 + 0; b = $2 + 0
+		if (a == 0 || a == 10 || a == 127 || a >= 224) next
+		if (a == 100 && b >= 64 && b <= 127) next
+		if (a == 169 && b == 254) next
+		if (a == 172 && b >= 16 && b <= 31) next
+		if (a == 192 && b == 168) next
+		n = ((a * 256 + b) * 256 + $3) * 256 + $4
+		s = 2 ^ (32 - p)
+		n = n - n % s
+		o4 = n % 256; n = int(n / 256); o3 = n % 256; n = int(n / 256); o2 = n % 256; o1 = int(n / 256)
+		if (p == 32) printf "%d.%d.%d.%d\n", o1, o2, o3, o4
+		else printf "%d.%d.%d.%d/%d\n", o1, o2, o3, o4, p
+	}' | sort -u
+}
+
+# $1 = format, stdin = raw download. stdout = candidates for clean().
+extract() {
+	case "$1" in
+	spamhaus-json) grep -o '"cidr":"[0-9./]*"' | sed 's/"cidr":"//; s/"$//' ;;
+	plain) sed 's/[#;].*//' | awk 'NF { print $1 }' ;;
+	dshield) awk '!/^#/ && $1 ~ /^[0-9.]+$/ && $3 ~ /^[0-9]+$/ { print $1 "/" $3 }' ;;
+	*) return 1 ;;
+	esac
+}
+
+# $1 = name, $2 = format, $3 = url. Updates $V/src/$1.txt when the new copy is good.
+fetch() {
+	t=$V/src/$1.download
+	case "$2" in spamhaus-json | plain | dshield) ;; *) log err "$1: unknown format $2"; return 0 ;; esac
+	if ! curl -fsSL --max-time 90 --retry 2 -A fw-blocklists -o "$t" "$3"; then
+		log warning "$1: download failed; keeping the last good copy"
+		rm -f "$t"
+		return 0
+	fi
+	extract "$2" <"$t" | clean >"$V/src/$1.new"
+	rm -f "$t"
+	new=$(wc -l <"$V/src/$1.new")
+	old=$(cat "$V/src/$1.txt" 2>/dev/null | wc -l)
+	if [ "$new" -eq 0 ] && [ "$old" -gt 0 ]; then
+		log warning "$1: new copy is empty; keeping $old entries"
+		rm -f "$V/src/$1.new"
+	elif [ "$old" -ge 100 ] && [ $((new * 2)) -lt "$old" ]; then
+		log warning "$1: new copy has $new entries, last had $old; keeping the last copy"
+		rm -f "$V/src/$1.new"
+	else
+		mv "$V/src/$1.new" "$V/src/$1.txt"
+	fi
+}
+
+# $1 = set name, stdin = addresses. stdout = nft commands that replace the set contents.
+nft_set() {
+	echo "flush set inet fw $1"
+	awk -v set="$1" '
+	{ a[n++] = $0 }
+	END {
+		for (i = 0; i < n; i += 500) {
+			printf "add element inet fw %s {", set
+			for (j = i; j < i + 500 && j < n; j++) printf "%s %s", (j > i ? "," : ""), a[j]
+			print " }"
+		}
+	}'
+}
+
+build() { # stdout = the complete sets file
+	srcs=""
+	for f in $(echo "$BL_SOURCES" | awk -F'|' 'NF == 3 { print $1 }'); do srcs="$srcs $V/src/$f.txt"; done
+	# shellcheck disable=SC2086
+	cat $srcs /dev/null 2>/dev/null | sort -u | nft_set bl_v4
+	geo=""
+	for c in $GEO_COUNTRIES; do geo="$geo $V/src/geo-$c.txt"; done
+	if [ "${GEO_ACTION:-log}" = drop ]; then g=geo_drop_v4; e=geo_log_v4; else g=geo_log_v4; e=geo_drop_v4; fi
+	# shellcheck disable=SC2086
+	cat $geo /dev/null 2>/dev/null | sort -u | nft_set $g
+	echo "flush set inet fw $e"
+}
+
+counts() {
+	bl=$(grep -h -o '[0-9./]*[0-9]' "$1" | grep -c '\.')
+	printf 'updated=%s entries=%s geo=%s geo_action=%s\n' "$(date -u +%FT%TZ)" "$bl" "${GEO_COUNTRIES:-none}" "${GEO_ACTION:-log}"
+}
+
+case "${1:-}" in
+update)
+	[ "${BL_ENABLE:-1}" = 1 ] || { log info "BL_ENABLE is not 1; emptying the sets"; BL_SOURCES=""; GEO_COUNTRIES=""; }
+	mkdir -p "$V/src"
+	echo "$BL_SOURCES" | while IFS='|' read -r name fmt url; do
+		[ -n "$name" ] && [ -n "$url" ] && fetch "$name" "$fmt" "$url"
+	done
+	for c in $GEO_COUNTRIES; do
+		case "$c" in [a-z][a-z]) ;; *) log err "GEO_COUNTRIES: $c is not a two-letter code"; continue ;; esac
+		# shellcheck disable=SC2059
+		fetch "geo-$c" plain "$(printf "$GEO_URL" "$c")"
+	done
+	build >"$SETS.new"
+	if ! nft -c -f "$SETS.new" 2>"$V/nft.err"; then
+		log err "the new sets file does not load ($(head -c 300 "$V/nft.err")); the old sets stay"
+		exit 1
+	fi
+	nft -f "$SETS.new" || { log err "nft -f failed; the old sets stay"; exit 1; }
+	mv "$SETS.new" "$SETS"
+	counts "$SETS" >"$V/counts"
+	log info "loaded: $(cat "$V/counts")"
+	;;
+load)
+	[ -s "$SETS" ] || exit 0
+	nft -f "$SETS" && log info "cache loaded: $(cat "$V/counts" 2>/dev/null)"
+	;;
+selftest)
+	r=$(printf '%s\n' '{"cidr":"1.10.16.0/20","sblid":"x"}' '{"type":"metadata"}' |
+		extract spamhaus-json | clean)
+	[ "$r" = 1.10.16.0/20 ] || { echo "spamhaus-json: got '$r'"; exit 1; }
+	r=$(printf '%s\n' '# c' '50.16.16.211' '10.1.2.3' '@@LAN_PREFIX@@.5' '8.8.8.8/4' '300.1.1.1' '1.2.3.77/24 ; x' |
+		extract plain | clean | tr '\n' ' ')
+	[ "$r" = "1.2.3.0/24 50.16.16.211 " ] || { echo "plain: got '$r'"; exit 1; }
+	r=$(printf '%s\t%s\t%s\t%s\n' '#h' x x x '66.132.186.0' '66.132.186.255' 24 354 | extract dshield | clean)
+	[ "$r" = 66.132.186.0/24 ] || { echo "dshield: got '$r'"; exit 1; }
+	r=$(printf '%s\n' 1.1.1.1 2.2.2.0/24 | nft_set bl_v4 | tr '\n' '|')
+	[ "$r" = "flush set inet fw bl_v4|add element inet fw bl_v4 { 1.1.1.1, 2.2.2.0/24 }|" ] || { echo "nft_set: got '$r'"; exit 1; }
+	echo "selftest ok"
+	;;
+*)
+	echo "usage: fw-blocklists update|load|selftest" >&2
+	exit 2
+	;;
+esac

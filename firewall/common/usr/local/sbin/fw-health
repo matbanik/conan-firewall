@@ -1,0 +1,46 @@
+#!/bin/sh
+# One syslog line an hour (tag fw-health, loaded into the database): services, WAN, DNS, load, conntrack, disk, temperature,
+# IDS alerts and DNS blocks in the last hour, blocklist size, shaper, and whether a reboot is waiting.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+H=/var/lib/fw-health
+mkdir -p "$H"
+
+# New lines in a log file since the last run (a rotated file starts again from 0).
+delta() { # $1 = file, $2 = state name
+	now=$(wc -l <"$1" 2>/dev/null || echo 0)
+	prev=$(cat "$H/$2" 2>/dev/null || echo "$now")
+	echo "$now" >"$H/$2"
+	if [ "$now" -ge "$prev" ]; then echo $((now - prev)); else echo "$now"; fi
+}
+
+svc=""
+for u in nftables dnsmasq unbound suricata chrony rsyslog; do
+	svc="$svc $u=$(systemctl is-active "$u" 2>/dev/null)"
+done
+failed=$(systemctl --failed --no-legend --plain 2>/dev/null | wc -l)
+wan=$(ip -4 -o addr show dev wan0 scope global 2>/dev/null | awk '{ sub(/\/.*/, "", $4); print $4; exit }')
+dns=fail
+[ -n "$(dig +short +time=2 +tries=1 @127.0.0.1 debian.org A 2>/dev/null)" ] && dns=ok
+ct=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo -)
+ctmax=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo -)
+load=$(cut -d ' ' -f 1-3 /proc/loadavg)
+mem=$(awk '/MemAvailable/ { printf "%d", $2 / 1024 }' /proc/meminfo)
+disk=$(df -P / | awk 'NR == 2 { print $5 }')
+temp=$(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | sort -n | tail -n 1)
+leases=$(wc -l </var/lib/misc/dnsmasq.leases 2>/dev/null || echo 0)
+up=$(cut -d . -f 1 /proc/uptime)
+ids=$(delta /var/log/suricata/fast.log ids.lines)
+dnsbl=$(delta /var/log/dnsbl.log dnsbl.lines)
+bl=$(sed -n 's/.*entries=\([0-9]*\).*/\1/p' /var/lib/fw-blocklists/counts 2>/dev/null)
+# If something loaded the ruleset without fw-blocklists-load (nft -f by hand), load the cache again.
+if [ "${bl:-0}" -gt 0 ] && ! nft list set inet fw bl_v4 2>/dev/null | grep -q elements; then
+	/usr/local/sbin/fw-blocklists load && bl="${bl}(reloaded)"
+fi
+shaper=off
+tc qdisc show dev wan0 2>/dev/null | grep -q cake && shaper=on
+reboot=no
+[ -e /run/reboot-required ] && reboot=yes
+
+logger -t fw-health -p daemon.info -- "wan=${wan:-none} dns=$dns$svc failed_units=$failed load=$load" \
+	"mem_avail=${mem}MB conntrack=$ct/$ctmax disk=$disk temp=$((${temp:-0} / 1000))C leases=$leases uptime=$((up / 3600))h" \
+	"ids_alerts_1h=$ids dnsbl_blocks_1h=$dnsbl blocklist=${bl:-0} shaper=$shaper reboot_required=$reboot"

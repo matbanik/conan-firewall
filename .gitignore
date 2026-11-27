@@ -1,0 +1,18 @@
+# Generated at cutover from a live ASUS dump: current leases with MACs and hostnames.
+firewall/out/
+
+# Local tool state
+.serena/
+__pycache__/
+*.pyc
+
+# Secrets never belong here. store-wan-secrets.ps1 writes them on the box only.
+*.secret
+*.key
+*.pem
+
+# Rendered sites (tools/render-site.py)
+/out/
+# Your own site values. Only the example is tracked.
+/site/*
+!/site/example/

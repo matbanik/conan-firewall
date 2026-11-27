@@ -1,0 +1,94 @@
+#!/bin/sh
+# DNS blocklists for unbound (RPZ zones in /etc/unbound/unbound.conf.d/firewall-rpz.conf).
+#   fw-dnsbl update     download the lists, rebuild the zone files, reload the zones in unbound
+#   fw-dnsbl seed       write an empty zone file for each list that has none (deploy.sh runs this)
+#   fw-dnsbl empty      stop blocking now: empty all list zones (the next update fills them again
+#                       unless DNSBL_ENABLE=0)
+#   fw-dnsbl selftest   check the filter on sample lines (validate.sh runs this)
+# Settings: /etc/default/fw-dnsbl. Log tag: fw-dnsbl.
+#
+# The zone files are rebuilt from the download: only "name CNAME ." and "*.name CNAME ." lines are kept,
+# so a list can block a name but never redirect it. A download that fails, or has fewer than DNSBL_MIN
+# names, or less than half of the last good copy, is not used.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+umask 022
+CONF=${FW_DNSBL_CONF:-/etc/default/fw-dnsbl}
+[ -r "$CONF" ] && . "$CONF"
+Z=${FW_DNSBL_DIR:-/var/lib/unbound/rpz}
+
+log() { logger -t fw-dnsbl -p "daemon.$1" -- "$2"; if [ -t 2 ]; then echo "$2" >&2; fi; }
+
+header() {
+	printf '$TTL 3600\n@ SOA localhost. root.localhost. %s 28800 3600 259200 3600\n  NS localhost.\n' "$(date +%s)"
+}
+
+# stdin = RPZ text. stdout = block entries only, lower case.
+filter() {
+	tr 'A-Z' 'a-z' | tr -d '\r' |
+		awk 'NF == 3 && $2 == "cname" && $3 == "." && $1 ~ /^(\*\.)?[a-z0-9_-]+(\.[a-z0-9_-]+)+\.?$/ { print $1 " CNAME ." }'
+}
+
+entries() { n_=$(grep -c ' CNAME \.$' "$1" 2>/dev/null) || :; echo "${n_:-0}"; }
+
+reload() { # $1 = list name
+	if unbound-control auth_zone_reload "rpz.$1" >/dev/null 2>&1; then return 0; fi
+	log warning "unbound-control auth_zone_reload rpz.$1 failed; reloading unbound"
+	systemctl reload unbound.service
+}
+
+names() { echo "$DNSBL_LISTS" | awk -F'|' 'NF == 2 { print $1 }'; }
+
+case "${1:-}" in
+seed)
+	install -d -m 0755 -o unbound -g unbound "$Z"
+	for n in $(names); do
+		[ -s "$Z/$n.rpz" ] || { header >"$Z/$n.rpz"; chown unbound:unbound "$Z/$n.rpz"; }
+	done
+	;;
+empty)
+	for n in $(names); do
+		header >"$Z/$n.rpz.new" && chown unbound:unbound "$Z/$n.rpz.new" && mv "$Z/$n.rpz.new" "$Z/$n.rpz" && reload "$n"
+	done
+	log notice "all DNS block zones emptied"
+	;;
+update)
+	install -d -m 0755 -o unbound -g unbound "$Z"
+	echo "$DNSBL_LISTS" | while IFS='|' read -r n url; do
+		[ -n "$n" ] && [ -n "$url" ] || continue
+		if [ "${DNSBL_ENABLE:-1}" != 1 ]; then
+			[ "$(entries "$Z/$n.rpz")" -eq 0 ] && continue
+			header >"$Z/$n.rpz.new"
+		else
+			t=$Z/$n.download
+			if ! curl -fsSL --max-time 300 --retry 2 -A fw-dnsbl -o "$t" "$url"; then
+				log warning "$n: download failed; keeping the last good copy"
+				rm -f "$t"
+				continue
+			fi
+			{ header; filter <"$t"; } >"$Z/$n.rpz.new"
+			rm -f "$t"
+			new=$(entries "$Z/$n.rpz.new")
+			old=$(entries "$Z/$n.rpz")
+			if [ "$new" -lt "${DNSBL_MIN:-10000}" ] || [ $((new * 2)) -lt "$old" ]; then
+				log warning "$n: new copy has $new names (last good $old, minimum ${DNSBL_MIN:-10000}); not used"
+				rm -f "$Z/$n.rpz.new"
+				continue
+			fi
+		fi
+		chown unbound:unbound "$Z/$n.rpz.new"
+		mv "$Z/$n.rpz.new" "$Z/$n.rpz"
+		reload "$n" && log info "$n: $(entries "$Z/$n.rpz") names loaded"
+	done
+	;;
+selftest)
+	r=$(printf '%s\n' '$TTL 3600' '@ SOA localhost. root.localhost. 1 2 3 4 5' '  NS  localhost.' '; c' \
+		'Ad.Example.COM CNAME .' '*.ad.example.com CNAME .' 'evil.example CNAME good.example.' \
+		'x.example A 1.2.3.4' 'bad name CNAME .' 'nodot CNAME .' | filter | tr '\n' '|')
+	[ "$r" = "ad.example.com CNAME .|*.ad.example.com CNAME .|" ] || { echo "filter: got '$r'"; exit 1; }
+	echo "selftest ok"
+	;;
+*)
+	echo "usage: fw-dnsbl update|seed|empty|selftest" >&2
+	exit 2
+	;;
+esac

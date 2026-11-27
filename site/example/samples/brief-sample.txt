@@ -1,0 +1,33 @@
+SAMPLE. Every name, address and number below is invented. It shows the form of the daily brief mail.
+
+Subject: LOOK: new remote-access tool on laptop1; all else normal
+
+Needs a decision
+- laptop1 (192.168.50.31) started using AnyDesk yesterday at 14:10: 38 connections to its relay
+  servers, 61 MB. It was never seen on this device before. If you installed it, tell me and I
+  will note it as normal. If not, remove it from the laptop. Blocking its names in the DNS filter
+  would stop it for every device in the house.
+
+Unusual
+- tv2 asked for 4,120 names in one hour (21:00), ten times its usual number. All were for
+  one advert service and the filter refused them. No action needed; it stopped by itself.
+
+Ways in
+- Approved forward: Acme (203.0.113.45) to adminpc, TCP 21117, 2 sessions, 212 MB. As expected.
+- No other inbound connection. 18,440 refused tries from 3,912 addresses, the usual level.
+- No port-mapping requests. No new tunnels or VPNs.
+
+Traffic
+- 41.3 GB down, 3.8 GB up, 27 devices. Biggest: tv2 22.1 GB (video streaming),
+  adminpc 9.4 GB (a game update at 19:30, which is also the day's one spike).
+- No new devices.
+
+Telemetry
+- Smart TV and phone telemetry as usual, 96 percent refused by the filter.
+
+Updates
+- Installed: 3 Debian security fixes (openssl, curl, libxml2). No reboot needed.
+- Suricata rules and block lists updated on time. BIOS is current.
+
+System
+- All services up. Database 12.4 GB of 85 GB. Config backup taken at 06:30.

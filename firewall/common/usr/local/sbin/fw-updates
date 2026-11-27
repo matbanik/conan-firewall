@@ -1,0 +1,197 @@
+#!/usr/bin/python3 -I
+"""fw-updates: what was updated on this box, what is waiting, and whether the automatic update jobs ran.
+
+Read-only. It runs as root before the daily report (fw-report.service, ExecStartPre=+) because the unattended-upgrades
+log and needrestart need root. It writes plain text to the path given (default: stdout), which fw-report puts in the
+report as the section "Updates". The updating itself is done by:
+  - unattended-upgrades (apt-daily-upgrade.timer): Debian security, point releases, stable-updates, backports that are
+    already installed (Suricata) and Claude Code from Anthropic's apt repository; needrestart restarts services after it,
+    and a new kernel or microcode reboots the box at 04:30 (/etc/apt/apt.conf.d/52firewall-unattended);
+  - fw-duckdb-update (weekly, same major version only), fw-suricata-update (rules, daily), fw-blocklists (6 h),
+    fw-dnsbl (twice a day), fw-asn (weekly).
+The BIOS is not updated automatically; fw-bios-check (weekly) compares it with Lenovo's catalog, and its result is here.
+"""
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C.UTF-8"}
+DAY = 86400
+# Suites that unattended-upgrades installs from (52firewall-unattended plus Debian's 50unattended-upgrades).
+AUTO_SUITES = {"trixie", "trixie-security", "trixie-updates", "trixie-backports", "stable"}
+# fw-report is left out: this program runs at its start. fw-brief has no timer of its own (fw-report starts it).
+JOBS = ["apt-daily", "apt-daily-upgrade", "fw-suricata-update", "fw-blocklists", "fw-dnsbl", "fw-asn",
+        "fw-duckdb-update", "fw-bios-check", "fw-archive", "fw-brief"]
+KEY_PACKAGES = ["claude-code", "suricata", "suricata-update", "nftables", "unbound", "dnsmasq", "chrony",
+                "openssh-server", "python3", "systemd", "intel-microcode", "unattended-upgrades", "needrestart"]
+
+
+def run(*cmd, timeout=60):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=ENV)
+        return r.stdout.strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"({cmd[0]} failed: {e})"
+
+
+def read(path, default=""):
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return default
+
+
+def stamp(path):
+    try:
+        return time.strftime("%m-%d %H:%M", time.localtime(os.stat(path).st_mtime))
+    except OSError:
+        return "never"
+
+
+def os_part():
+    rel = dict(re.findall(r'^(\w+)="?([^"\n]*)"?$', read("/etc/os-release"), re.M))
+    running = os.uname().release
+    kernels = sorted((p.name[len("vmlinuz-"):] for p in Path("/boot").glob("vmlinuz-*")),
+                     key=lambda v: [int(x) if x.isdigit() else x for x in re.split(r"[.+-]", v)])
+    newest = kernels[-1] if kernels else "?"
+    up = float(read("/proc/uptime", "0").split()[0]) / DAY
+    debian = read("/etc/debian_version").strip()
+    out = [f"OS: {rel.get('PRETTY_NAME', '?')} (point release {debian}), up {up:.1f} days",
+           f"Kernel: running {running}, newest installed {newest}" + ("" if newest == running else "  << differs, reboot pending")]
+    if Path("/run/reboot-required").exists():
+        pkgs = " ".join(read("/run/reboot-required.pkgs").split()) or "?"
+        out.append(f"Reboot required: yes, for {pkgs} (automatic at 04:30)")
+    else:
+        out.append("Reboot required: no")
+    bios = read("/sys/class/dmi/id/bios_version").strip()
+    bdate = read("/sys/class/dmi/id/bios_date").strip()
+    out.append(f"BIOS: {bios} dated {bdate} (installed by hand only; fw-bios-check compares it with Lenovo's catalog weekly)")
+    status = read("/var/lib/fw-bios-check/status.txt").strip().splitlines()
+    if status:
+        out.append(f"  Lenovo catalog, {status[0]}: " + (status[1] if len(status) > 1 else "?"))
+    else:
+        out.append("  BIOS check: no result yet (fw-bios-check has not run)")
+    return out
+
+
+def apt_part():
+    lists = next((p for p in ("/var/lib/apt/periodic/update-success-stamp", "/var/lib/apt/periodic/update-stamp")
+                  if os.path.exists(p)), "")
+    out = [f"Package lists refreshed {stamp(lists)}, "
+           f"unattended-upgrades last ran {stamp('/var/lib/apt/periodic/unattended-upgrades-stamp')}"]
+    # Installed or upgraded in the last 24 hours, from dpkg's own log (old -> new version).
+    since = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - DAY))
+    changes = []
+    for log in ("/var/log/dpkg.log.1", "/var/log/dpkg.log"):
+        for line in read(log).splitlines():
+            m = re.match(r"(\S+ \S+) (upgrade|install|remove) (\S+) (\S+) (\S+)", line)
+            if m and m.group(1) >= since:
+                ts, act, pkg, old, new = m.groups()
+                pkg = pkg.split(":")[0]
+                changes.append(f"{ts[5:16]} {pkg} {old} -> {new}" if act == "upgrade" else f"{ts[5:16]} {act} {pkg} {new if act == 'install' else old}")
+    out.append(f"Changed in the last 24 hours: {len(changes)}")
+    out += ["  " + c for c in changes[:40]]
+    if len(changes) > 40:
+        out.append(f"  ... and {len(changes) - 40} more (/var/log/dpkg.log)")
+    # Waiting upgrades and whether unattended-upgrades would take them.
+    waiting = []
+    for line in run("apt", "list", "--upgradable").splitlines():
+        m = re.match(r"([^/\s]+)/(\S+) (\S+) \S+ \[upgradable from: ([^\]]+)\]", line)
+        if m:
+            pkg, suites, new, old = m.groups()
+            auto = any(s in AUTO_SUITES for s in suites.split(","))
+            waiting.append(f"  {pkg} {old} -> {new} from {suites}" + ("" if auto else "  << not in the automatic list"))
+    out.append(f"Waiting upgrades: {len(waiting)}")
+    out += waiting[:30]
+    held = run("apt-mark", "showhold").split()
+    out.append("Held packages: " + (" ".join(held) if held else "none"))
+    # Problems unattended-upgrades logged in the last 24 hours.
+    since_uu = time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() - DAY))
+    probs = [line for line in read("/var/log/unattended-upgrades/unattended-upgrades.log").splitlines()
+             if line[:16] >= since_uu and re.search(r"\b(ERROR|WARNING)\b", line) and "battery" not in line]
+    out.append(f"unattended-upgrades errors or warnings in 24 hours: {len(probs)}")
+    out += ["  " + p[:160] for p in probs[-8:]]
+    # Services still running old library code (needrestart batch mode, list only).
+    nr = run("needrestart", "-b", "-r", "l")
+    svcs = re.findall(r"^NEEDRESTART-SVC: (\S+)", nr, re.M)
+    out.append("Services on old libraries: " + (" ".join(svcs) + " (needrestart leaves these to the next reboot)" if svcs else "none"))
+    return out
+
+
+def versions_part():
+    q = run("dpkg-query", "-W", "-f", "${Package} ${Version}\\n", *KEY_PACKAGES)
+    have = dict(line.split(" ", 1) for line in q.splitlines() if " " in line)
+    out = ["Versions: " + ", ".join(f"{p} {have[p]}" for p in KEY_PACKAGES if p in have)]
+    pol = run("apt-cache", "policy", "claude-code")
+    cand = re.search(r"Candidate: (\S+)", pol)
+    out.append(f"Claude Code: installed {have.get('claude-code', 'none')}, newest in its apt channel {cand.group(1) if cand else '?'}"
+               " (channel 'stable'; updated by unattended-upgrades, its own auto-updater is off)")
+    duck = run("/usr/local/bin/duckdb", "--version").split()
+    out.append(f"DuckDB CLI: {duck[0] if duck else '?'} (fw-duckdb-update, weekly)")
+    fleet = Path("/home/fleet/.agent/fleet/fleet.py")
+    if fleet.exists():
+        out.append(f"Fleet member program: fleet.py of {stamp(fleet)} (comes from the hub, hash-checked)")
+    rules = Path("/var/lib/suricata/rules/suricata.rules")
+    out.append(f"Suricata rules file: {stamp(rules)}")
+    return out
+
+
+def jobs_part():
+    def show(unit, props):
+        return dict(line.split("=", 1) for line in run("systemctl", "show", unit, "-p", props).splitlines() if "=" in line)
+
+    def short(ts):
+        m = re.search(r"\d{4}-(\d\d-\d\d \d\d:\d\d)", ts or "")
+        return m.group(1) if m else ""
+
+    out = ["Update and data jobs (last run, result, next run):"]
+    for j in JOBS:
+        svc = show(f"{j}.service", "ExecMainExitTimestamp,Result,ExecMainStatus")
+        tim = show(f"{j}.timer", "LastTriggerUSec,NextElapseUSecRealtime,LoadState")
+        has_timer = tim.get("LoadState") == "loaded"
+        # The timer's last trigger survives a reboot (Persistent=); the service's exit time does not.
+        last = short(tim.get("LastTriggerUSec")) if has_timer else ""
+        last = last or short(svc.get("ExecMainExitTimestamp"))
+        res = svc.get("Result", "?")
+        ran_since_boot = bool(short(svc.get("ExecMainExitTimestamp")))
+        line = f"  {j}: {last or 'never'}"
+        line += f", {res}" if ran_since_boot else ", result not kept over the reboot" if last else ""
+        if ran_since_boot and svc.get("ExecMainStatus", "0") != "0":
+            line += f" (exit {svc['ExecMainStatus']})"
+        if has_timer and short(tim.get("NextElapseUSecRealtime")):
+            line += f", next {short(tim.get('NextElapseUSecRealtime'))}"
+        if ran_since_boot and res != "success":
+            line += f"  << check: journalctl -u {j}"
+        out.append(line)
+    failed = run("systemctl", "--failed", "--plain", "--no-legend").splitlines()
+    out.append("Failed units: " + (", ".join(line.split()[0] for line in failed if line.strip()) if failed else "none"))
+    return out
+
+
+def main():
+    lines = [f"Collected {time.strftime('%Y-%m-%d %H:%M')} by fw-updates (root, read-only)."]
+    for part in (os_part, apt_part, versions_part, jobs_part):
+        try:
+            lines += part()
+        except Exception as e:  # one broken part must not hide the others
+            lines.append(f"({part.__name__} failed: {type(e).__name__}: {e})")
+    text = "\n".join(lines) + "\n"
+    if len(sys.argv) > 1:
+        dest = Path(sys.argv[1])
+        tmp = dest.with_suffix(".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.chmod(tmp, 0o640)
+        try:
+            st = dest.parent.stat()
+            os.chown(tmp, st.st_uid, st.st_gid)
+        except OSError:
+            pass
+        tmp.replace(dest)
+    else:
+        sys.stdout.write(text)
+
+
+main()

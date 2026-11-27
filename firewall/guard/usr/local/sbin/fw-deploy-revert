@@ -1,0 +1,55 @@
+#!/bin/sh
+# Puts back the configuration saved by deploy.sh and reboots.
+# Usage: fw-deploy-revert [backup-dir] [--no-reboot]   (default: the pending deploy's backup)
+# If the restore or the initramfs rebuild fails it says so, writes <backup-dir>/revert-failed, keeps the
+# pending marker and does not reboot: the box stays reachable for a repair (mgmt0, ssh fwadmin@10.255.255.1).
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+[ "$(id -u)" -eq 0 ] || exec sudo "$0" "$@"
+M=/var/lib/fw-deploy/pending
+B=""
+noreboot=0
+for a in "$@"; do
+	case "$a" in --no-reboot) noreboot=1 ;; *) B=$a ;; esac
+done
+[ -n "$B" ] || B=$(sed -n 's/^backup=//p' "$M" 2>/dev/null)
+[ -n "$B" ] && [ -d "$B" ] || { echo "fw-deploy-revert: no backup directory" >&2; exit 1; }
+fail() {
+	echo "$1" >>"$B/revert-failed"
+	logger -t fw-deploy -p daemon.err "revert from $B FAILED: $1. Not rebooting; the deploy stays pending. Repair over mgmt0."
+	echo "fw-deploy-revert: FAILED: $1 (see $B/revert-failed)" >&2
+	exit 1
+}
+# Check the archive before anything changes.
+if [ -s "$B/existed.list" ]; then
+	[ -s "$B/previous.tar" ] || fail "previous.tar is missing or empty"
+	tar -tf "$B/previous.tar" >/dev/null 2>&1 || fail "previous.tar is not readable"
+fi
+logger -t fw-deploy -p daemon.warning "reverting deploy: restoring $B"
+
+# Unit enable states first, while the unit files still exist.
+if [ -f "$B/units.list" ]; then
+	while read -r unit state; do
+		case "$state" in
+		enabled) systemctl enable "$unit" ;;
+		disabled | not-found) systemctl disable "$unit" ;;
+		esac
+	done <"$B/units.list" >/dev/null 2>&1
+fi
+# Files the deploy added, then the files it replaced.
+if [ -f "$B/new.list" ]; then
+	while IFS= read -r f; do
+		[ -n "$f" ] || continue
+		rm -f "/$f" || fail "could not remove /$f"
+	done <"$B/new.list"
+fi
+if [ -s "$B/previous.tar" ]; then
+	tar -C / -xpf "$B/previous.tar" || fail "tar could not restore previous.tar"
+fi
+systemctl daemon-reload
+# Interface names (.link files) are read from the initramfs. A stale one would boot with the deploy's names.
+update-initramfs -u >/dev/null 2>&1 || fail "update-initramfs failed (files restored; run it again, then reboot)"
+rm -f "$M"
+command -v etckeeper >/dev/null && etckeeper commit "fw-deploy revert from $B" >/dev/null 2>&1
+logger -t fw-deploy "revert done"
+[ $noreboot -eq 1 ] && { echo "reverted; reboot to apply"; exit 0; }
+systemctl reboot

@@ -1,0 +1,9 @@
+[Unit]
+Description=Retry messages that could not be sent
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=30min
+
+[Install]
+WantedBy=timers.target

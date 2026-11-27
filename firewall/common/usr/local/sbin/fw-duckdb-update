@@ -1,0 +1,54 @@
+#!/bin/sh
+# Updates the DuckDB CLI from its GitHub release, weekly (fw-duckdb-update.timer). DuckDB is not in Debian.
+# The download must match the SHA-256 digest that GitHub publishes for the release asset, and the new binary
+# must report the release version, before it replaces the old one. The old binary stays as <bin>.prev.
+# A new major version is not installed (its database format can change); the log names it instead.
+# Settings: /etc/default/fw-duckdb-update. Log tag: fw-duckdb-update.
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+CONF=${FW_DUCKDB_CONF:-/etc/default/fw-duckdb-update}
+[ -r "$CONF" ] && . "$CONF"
+BIN=${DUCKDB_BIN:-/usr/local/bin/duckdb}
+ASSET=${DUCKDB_ASSET:-duckdb-cli-linux-amd64.tar.gz}
+log() { logger -t fw-duckdb-update -p "daemon.$1" -- "$2"; if [ -t 2 ]; then echo "$2" >&2; fi; }
+
+[ -x "$BIN" ] || { log warning "$BIN not found; nothing to update"; exit 0; }
+cur=$("$BIN" --version 2>/dev/null | awk '{ print $1; exit }')
+T=$(mktemp -d /tmp/fw-duckdb.XXXXXX)
+trap 'rm -rf "$T"' EXIT
+
+curl -fsSL --max-time 60 -H 'Accept: application/vnd.github+json' -A fw-duckdb-update \
+	-o "$T/release.json" https://api.github.com/repos/duckdb/duckdb/releases/latest ||
+	{ log warning "GitHub API request failed"; exit 1; }
+info=$(python3 -I - "$T/release.json" "$ASSET" <<'EOF'
+import json, sys
+r = json.load(open(sys.argv[1]))
+for a in r.get("assets", []):
+    if a.get("name") == sys.argv[2]:
+        d = a.get("digest") or ""
+        print(r["tag_name"], a["browser_download_url"], d.split(":", 1)[1] if d.startswith("sha256:") else "")
+        break
+EOF
+)
+set -- $info
+tag=${1:-}
+url=${2:-}
+sum=${3:-}
+[ -n "$tag" ] && [ -n "$url" ] || { log warning "no asset $ASSET in the latest release"; exit 1; }
+[ "$tag" = "$cur" ] && exit 0
+major() { echo "$1" | sed -n 's/^v\([0-9][0-9]*\)\..*/\1/p'; }
+if [ "$(major "$tag")" != "$(major "$cur")" ]; then
+	log notice "DuckDB $tag is out (installed: $cur). New major version: not installed automatically."
+	exit 0
+fi
+echo "$sum" | grep -q -E '^[0-9a-f]{64}$' || { log err "$tag: GitHub gives no sha256 digest for $ASSET; not installed"; exit 1; }
+curl -fsSL --max-time 300 -A fw-duckdb-update -o "$T/$ASSET" "$url" || { log warning "download of $tag failed"; exit 1; }
+echo "$sum  $T/$ASSET" | sha256sum -c --status || { log err "$tag: checksum mismatch; not installed"; exit 1; }
+mkdir "$T/x"
+tar -xzf "$T/$ASSET" -C "$T/x" duckdb || { log err "$tag: no duckdb file in $ASSET"; exit 1; }
+new=$("$T/x/duckdb" --version 2>/dev/null | awk '{ print $1; exit }')
+[ "$new" = "$tag" ] || { log err "$tag: the new binary reports '$new'; not installed"; exit 1; }
+cp -p "$BIN" "$BIN.prev"
+install -m 0755 -o root -g root "$T/x/duckdb" "$BIN.new"
+mv "$BIN.new" "$BIN"
+log info "DuckDB updated: $cur -> $tag (old binary: $BIN.prev)"

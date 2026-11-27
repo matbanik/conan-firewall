@@ -1,0 +1,10 @@
+# Sourced by dhcpcd-run-hooks after every DHCP event. Hands wan0 events to wan-event in the background,
+# so a slow DDNS or mail server never holds up dhcpcd. wan-event takes a lock, so events run in order.
+if [ "$interface" = "wan0" ]; then
+	case "$reason" in
+	BOUND|RENEW|REBIND|REBOOT|EXPIRE|FAIL|NAK|RELEASE|STOP|NOCARRIER|CARRIER|DEPARTED)
+		setsid -f /usr/local/sbin/wan-event "$reason" "${old_ip_address:-}" "${new_ip_address:-}" \
+			</dev/null >/dev/null 2>&1
+		;;
+	esac
+fi

@@ -1,0 +1,20 @@
+# Settings for /usr/local/sbin/fw-blocklists (timer: fw-blocklists.timer, every 6 hours).
+# After a change: sudo systemctl start fw-blocklists.service
+
+# 1 = load the lists. 0 = empty the sets at the next update.
+BL_ENABLE=1
+
+# Bad IPv4 addresses. One source per line: name|format|url. Formats: spamhaus-json, plain, dshield.
+# WAN traffic from these is dropped silently. New LAN connections to them are dropped and logged (DROP_BLOUT).
+BL_SOURCES="spamhaus-drop|spamhaus-json|https://www.spamhaus.org/drop/drop_v4.json
+feodo-c2|plain|https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt
+et-compromised|plain|https://rules.emergingthreats.net/blockrules/compromised-ips.txt
+dshield-top|dshield|https://feeds.dshield.org/block.txt"
+
+# Countries, as two-letter lower-case codes separated by spaces, for example "cn ru". Empty = none.
+# GEO_ACTION=log: new LAN connections to these countries are allowed and logged ("ACCEPT GEO").
+# GEO_ACTION=drop: all traffic to and from these countries is dropped (DROP_GEO for LAN connections).
+# WAN connections that nobody asked for are already dropped, so drop mode changes only what LAN hosts can reach.
+GEO_COUNTRIES=""
+GEO_ACTION=log
+GEO_URL="https://www.ipdeny.com/ipblocks/data/aggregated/%s-aggregated.zone"

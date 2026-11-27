@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""fwq: run DuckDB SQL on the analysis database. The only command Claude may run in a job.
+
+  fwq "SELECT ..."              fwq -csv "SELECT ..."            fwq <<'SQL' ... SQL
+
+The firewall database (fw-ingest loads it every 10 minutes) is attached read-only as `fwdb`, when it exists.
+File access is limited to /var/log, /var/lib/fw-analysis and /var/lib/fwdb, extensions can't be installed or loaded, the
+configuration is locked before the query runs, and dot commands (.shell, .read, .output, ...) are refused.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+DB = os.environ.get("FWQ_DB") or "/var/lib/fw-analysis/fw.duckdb"
+FWDB = "/var/lib/fwdb/fwlog.duckdb"
+ALLOWED_DIRS = ("/var/log/", "/var/lib/fw-analysis/", "/var/lib/fwdb/")
+MODES = ("-markdown", "-csv", "-json", "-line", "-box")
+TIMEOUT_S = 600
+LOCK_TRIES = 30     # fw-ingest holds the database for a few seconds
+PRELUDE = (
+    "SET autoinstall_known_extensions = false;\n"
+    "SET autoload_known_extensions = false;\n"
+    "SET allowed_directories = [" + ", ".join(f"'{d}'" for d in ALLOWED_DIRS) + "];\n"
+    "SET enable_external_access = false;\n"
+    "SET lock_configuration = true;\n"
+)
+
+
+def main(argv: list[str]) -> int:
+    mode = "-markdown"
+    if argv and argv[0] in MODES:
+        mode, argv = argv[0], argv[1:]
+    sql = " ".join(argv) if argv else sys.stdin.read()
+    if not sql.strip():
+        print(f"usage: fwq [{'|'.join(MODES)}] SQL   (or SQL on stdin)", file=sys.stderr)
+        return 2
+    if "\0" in sql or any(line.lstrip().startswith(".") for line in sql.splitlines()):
+        print("fwq: dot commands are not allowed; use SQL only", file=sys.stderr)
+        return 2
+    duckdb = shutil.which("duckdb")
+    if not duckdb:
+        print("fwq: duckdb is not installed", file=sys.stderr)
+        return 2
+    prelude = PRELUDE
+    if os.access(FWDB, os.R_OK):
+        prelude = f"ATTACH '{FWDB}' AS fwdb (READ_ONLY);\n" + PRELUDE
+    try:
+        for _ in range(LOCK_TRIES):
+            probe = subprocess.run([duckdb, "-bail", "-c", prelude, DB], stdin=subprocess.DEVNULL, capture_output=True,
+                                   text=True, timeout=60)
+            if probe.returncode == 0 or "lock" not in probe.stderr.lower():
+                break
+            time.sleep(2)
+        r = subprocess.run([duckdb, mode, "-bail", "-c", prelude + sql, DB], stdin=subprocess.DEVNULL, timeout=TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        print(f"fwq: query stopped after {TIMEOUT_S} s", file=sys.stderr)
+        return 124
+    return r.returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

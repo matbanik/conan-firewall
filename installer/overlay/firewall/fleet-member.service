@@ -1,0 +1,61 @@
+# Fleet member loop for the analysis jobs (user "fleet", no sudo).
+# It makes outgoing connections to the hub only and opens no port.
+# It starts only after pairing has written member.json and fleet.py has been fetched and hash-checked.
+[Unit]
+Description=Fleet member (analysis jobs)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/home/fleet/.agent/fleet/member.json
+ConditionPathExists=/home/fleet/.agent/fleet/fleet.py
+
+[Service]
+User=fleet
+Group=fleet
+WorkingDirectory=/home/fleet
+Environment=HOME=/home/fleet DISABLE_AUTOUPDATER=1
+ExecStart=/usr/bin/python3 /home/fleet/.agent/fleet/fleet.py member
+Restart=on-failure
+RestartSec=30
+UMask=0077
+
+# Stay out of the way of the firewall's own work
+Nice=10
+CPUWeight=20
+IOWeight=20
+MemoryMax=3G
+TasksMax=256
+
+# Read-only system; writable: the fleet home and the analysis folder only
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindPaths=/home/fleet
+ReadWritePaths=/var/lib/fw-analysis
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+
+# claude -p sandboxes each command it runs with bubblewrap (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1).
+# bwrap needs these, tested on the box 2026-11-16 (systemd 257, bwrap 0.12):
+# - namespaces: Claude uses user, mnt, pid, net, ipc, uts and cgroup (cgroup-try fails hard when supported);
+#   time stays blocked
+RestrictNamespaces=user mnt pid net ipc uts cgroup
+# - netlink: bwrap brings up loopback in the new network namespace
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+# - RestrictSUIDSGID's filter makes openat2 return ENOSYS, and bwrap 0.12 has no fallback
+RestrictSUIDSGID=no
+# - a fresh /proc mount needs the existing /proc fully visible. These three lay read-only mounts over
+#   /proc/sys, /proc/kcore, /proc/kmsg and /proc/sys/kernel/{hostname,domainname}. The service is not root
+#   and has no capabilities, so those files stay unwritable (and kcore/kmsg unreadable) without them.
+ProtectKernelTunables=no
+ProtectKernelLogs=no
+ProtectHostname=no
+
+[Install]
+WantedBy=multi-user.target

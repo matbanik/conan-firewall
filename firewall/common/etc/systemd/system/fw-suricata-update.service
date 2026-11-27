@@ -1,0 +1,9 @@
+[Unit]
+Description=Update Suricata rules and reload Suricata
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The script picks the rule sources (/etc/default/fw-suricata-update) and reloads Suricata.
+ExecStart=/usr/local/sbin/fw-suricata-update

@@ -1,0 +1,11 @@
+# Build inputs and outputs. None of them belongs in git: fetch-downloads.sh and build-iso.sh make them again.
+*.iso
+*.iso.bad
+downloads/
+write-usb.log
+# The SSH public key is passed to build-iso.sh as a file; it is not kept here.
+authorized_keys
+*.pub
+# build-iso.sh refuses to run if these sit in the overlay
+overlay/firewall/duckdb
+overlay/firewall/claude-code.asc

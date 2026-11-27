@@ -1,0 +1,34 @@
+#!/bin/sh
+# Apply an nftables ruleset with automatic rollback.
+#   fw-apply FILE [SECONDS]      default 120 seconds
+# The current ruleset is saved, FILE is validated and applied, and a timer
+# restores the saved ruleset unless fw-confirm runs before it fires.
+set -eu
+[ "$(id -u)" = 0 ] || { echo "fw-apply: run as root" >&2; exit 1; }
+[ $# -ge 1 ] || { echo "usage: fw-apply FILE [SECONDS]" >&2; exit 2; }
+cand=$(readlink -f "$1"); secs=${2:-120}
+state=/var/lib/fw-apply
+
+grep -qx 'flush ruleset' "$cand" || { echo "fw-apply: $cand must contain a 'flush ruleset' line" >&2; exit 1; }
+if systemctl is-active -q fw-rollback.timer; then
+  echo "fw-apply: a change is already pending; run fw-confirm or wait for the rollback" >&2; exit 1
+fi
+nft -c -f "$cand"
+
+mkdir -p "$state"
+ts=$(date +%Y%m%d-%H%M%S)
+saved="$state/rollback-$ts.nft"
+{ echo "flush ruleset"; nft -s list ruleset; } > "$saved"
+echo "$cand" > "$state/pending"
+
+systemctl reset-failed fw-rollback.service fw-rollback.timer 2>/dev/null || true
+systemd-run --quiet --unit=fw-rollback --on-active="${secs}s" \
+  --timer-property=AccuracySec=1s /usr/sbin/nft -f "$saved"
+
+if ! nft -f "$cand"; then
+  systemctl stop fw-rollback.timer || true
+  rm -f "$state/pending"
+  echo "fw-apply: apply failed; previous ruleset unchanged" >&2; exit 1
+fi
+logger -t fw-apply "applied $cand, rollback in ${secs}s unless confirmed"
+echo "Applied $cand. Run 'fw-confirm \"reason\"' within ${secs}s or $saved is restored."

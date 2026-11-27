@@ -1,0 +1,28 @@
+// Firewall additions to Debian's 50unattended-upgrades. That file already takes the point releases
+// (origin=Debian, label=Debian) and the security updates. Lists here add to its lists.
+
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+
+Unattended-Upgrade::Origins-Pattern {
+	// stable-updates: tzdata, CA certificates and other fixes that cannot wait for a point release.
+	"origin=Debian,codename=${distro_codename}-updates,label=Debian";
+	// Only packages that are already installed from backports (Suricata) are upgraded from there.
+	"origin=Debian Backports,codename=${distro_codename}-backports,label=Debian Backports";
+	// Claude Code, from Anthropic's apt repository.
+	"origin=Anthropic,label=Anthropic";
+};
+
+// Keep our config files when a package ships a new one, so an upgrade never stops at a question.
+Dpkg::Options {
+	"--force-confdef";
+	"--force-confold";
+};
+
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
+Unattended-Upgrade::Automatic-Reboot-Time "04:30";
+Unattended-Upgrade::SyslogEnable "true";

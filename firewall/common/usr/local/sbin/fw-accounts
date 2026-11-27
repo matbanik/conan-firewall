@@ -1,0 +1,16 @@
+#!/bin/sh
+# Makes the system users, groups and folders of the database, the brief and the mail. Safe to run again. deploy.sh runs it.
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+getent group fwspool >/dev/null || groupadd --system fwspool
+id fwdb >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /var/lib/fwdb --gid adm --shell /usr/sbin/nologin fwdb
+id fwmail >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /nonexistent --gid fwspool --shell /usr/sbin/nologin fwmail
+# The database: fwdb writes, group adm (fwadmin and the analysis agent) reads.
+for d in /var/lib/fwdb /var/lib/fwdb/spool /var/lib/fwdb/tmp /var/lib/fwdb/reports; do
+	install -d -m 0750 -o fwdb -g adm "$d"
+done
+# The mail spool: a member of fwspool can add a message but not list the folder. Only fwmail reads and deletes.
+install -d -m 2730 -o fwmail -g fwspool /var/spool/fw-mail
+[ -e /var/log/lan-devices.log ] || install -m 0640 -o root -g adm /dev/null /var/log/lan-devices.log
+# Nothing in here may enter etckeeper's history.
+grep -qx 'credstore.encrypted/' /etc/.gitignore 2>/dev/null || echo 'credstore.encrypted/' >>/etc/.gitignore

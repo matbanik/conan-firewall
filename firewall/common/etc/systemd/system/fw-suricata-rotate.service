@@ -1,0 +1,8 @@
+[Unit]
+Description=Rotate the Suricata event log (daily; the package rotates it only once a week)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/logrotate --state /var/lib/fw-health/suricata-rotate.state /usr/local/share/fwdb/suricata-logrotate.conf
+Nice=10
+IOWeight=20

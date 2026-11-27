@@ -1,0 +1,53 @@
+/var/log/firewall.log
+{
+	daily
+	rotate 30
+	compress
+	delaycompress
+	missingok
+	notifempty
+	postrotate
+		/usr/lib/rsyslog/rsyslog-rotate
+	endscript
+}
+
+/var/log/dnsmasq.log
+{
+	daily
+	rotate 14
+	compress
+	delaycompress
+	missingok
+	notifempty
+	create 0640 dnsmasq adm
+	postrotate
+		systemctl kill --signal=USR2 dnsmasq.service 2>/dev/null || true
+	endscript
+}
+
+/var/log/dnsbl.log
+{
+	daily
+	rotate 14
+	compress
+	delaycompress
+	missingok
+	notifempty
+	postrotate
+		/usr/lib/rsyslog/rsyslog-rotate
+	endscript
+}
+
+/var/log/lan-devices.log
+{
+	weekly
+	rotate 12
+	compress
+	delaycompress
+	missingok
+	notifempty
+	create 0640 root adm
+	postrotate
+		/usr/lib/rsyslog/rsyslog-rotate
+	endscript
+}

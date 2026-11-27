@@ -1,0 +1,74 @@
+#!/bin/sh
+# Writes a tar of the firewall configuration and the database reports to stdout, for the backup that @@ADMIN_HOST@@ pulls.
+# Runs only as the forced command of the fwbackup SSH key (sudo -n, see /etc/sudoers.d/fw-backup).
+# It holds no secret: no password hashes, private keys, SSH host keys, provider or mail logins, and not the database.
+#   etc.tar           /etc without the files in EXCLUDE below and without etckeeper's history (an old commit can hold them)
+#   usr-local.tar     /usr/local/sbin and /usr/local/share: the fw-* jobs, the database schema and rules, the agent's tools
+#                     DuckDB in /usr/local/bin is left out; fw-duckdb-update installs it again.
+#   reports.tar       the daily database reports and the agent's briefs and notes (last 60 days), and the device names
+#   packages.tsv      installed packages and versions; apt-manual.txt: the packages installed by hand
+#   ruleset.nft       the live nftables rules without the blocklist contents; units-enabled.txt: enabled systemd units
+# The same key has two more commands, for the weekly archives of fw-archive: "archive-list" and "archive NAME".
+#   meta.txt          host, time, kernel, OS, last deploy; SHA256SUMS: checksums of the files above
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+umask 077
+A=/var/lib/fwdb/archive
+refuse() {
+	logger -t fw-backup -p daemon.warning "refused command"
+	echo "refused" >&2
+	exit 2
+}
+case "${1:-}" in
+"") ;;
+archive-list)
+	[ -d "$A" ] && find "$A" -maxdepth 1 -type f -name 'fwdb-*.tar.sha256' -exec cat {} +
+	exit 0
+	;;
+"archive fwdb-"*.tar)
+	n=${1#archive }
+	case "$n" in *[!A-Za-z0-9.-]*) refuse ;; esac
+	[ -f "$A/$n" ] && [ ! -L "$A/$n" ] || refuse
+	cat "$A/$n"
+	logger -t fw-backup -p daemon.info -- "archive sent $n"
+	exit 0
+	;;
+*) refuse ;;
+esac
+T=$(mktemp -d /run/fw-backup.XXXXXX)
+trap 'rm -rf "$T"' EXIT
+
+if command -v etckeeper >/dev/null && etckeeper unclean; then
+	etckeeper commit "fw-backup snapshot" >/dev/null 2>&1 || true
+fi
+tar -C / -cf "$T/etc.tar" --anchored --wildcards \
+	--exclude='etc/shadow*' --exclude='etc/security/opasswd*' --exclude='etc/chrony/chrony.keys' --exclude='etc/gshadow*' --exclude='etc/.git' --exclude='etc/wan-event' \
+	--exclude='etc/credstore*' --exclude='etc/ssh/ssh_host_*' --exclude='etc/ssl/private' --exclude='etc/machine-id' \
+	--exclude='etc/wireguard' --exclude='etc/ppp/*-secrets' --exclude='etc/NetworkManager/system-connections' \
+	--no-anchored --exclude='*.key' --exclude='*_rsa' --exclude='*_ed25519' --exclude='.netrc' --exclude='*.token' etc
+# A private key in any other file stops the export.
+if tar -xOf "$T/etc.tar" | grep -qa -e '-----BEGIN [A-Z ]*PRIVATE KEY-----'; then
+	logger -t fw-backup -p daemon.err "export stopped: a private key is in the /etc copy"
+	echo "a private key is in the /etc copy" >&2
+	exit 1
+fi
+tar -C / -cf "$T/usr-local.tar" usr/local/sbin usr/local/share
+find /var/lib/fwdb/reports /var/lib/fwdb/names.tsv /var/lib/fwdb/known-hosts.tsv /var/lib/fw-analysis/reports /var/lib/fw-analysis/notes \
+	-type f -mtime -60 -print0 2>/dev/null | sed -z 's,^/,,' | tar -C / --null -T - -cf "$T/reports.tar"
+dpkg-query -W -f '${binary:Package}\t${Version}\n' >"$T/packages.tsv"
+apt-mark showmanual >"$T/apt-manual.txt"
+nft -t list ruleset >"$T/ruleset.nft"
+systemctl list-unit-files --state=enabled --no-legend >"$T/units-enabled.txt"
+{
+	echo "host=$(hostname)"
+	echo "time=$(date -u +%FT%TZ)"
+	echo "kernel=$(uname -r)"
+	echo "os=$(. /etc/os-release && echo "$PRETTY_NAME")"
+	echo "etc_head=$(git -C /etc rev-parse HEAD 2>/dev/null)"
+	echo "last_deploy=$(ls -1 /var/backups/fw-deploy 2>/dev/null | tail -n 1)"
+	echo "last_report=$(ls -1 /var/lib/fwdb/reports 2>/dev/null | tail -n 1)"
+} >"$T/meta.txt"
+FILES="etc.tar usr-local.tar reports.tar packages.tsv apt-manual.txt ruleset.nft units-enabled.txt meta.txt"
+(cd "$T" && sha256sum $FILES >SHA256SUMS)
+tar -C "$T" -cf - $FILES SHA256SUMS
+logger -t fw-backup -p daemon.info -- "export sent ($(du -k "$T/reports.tar" | cut -f 1) KB reports)"

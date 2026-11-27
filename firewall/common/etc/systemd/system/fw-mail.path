@@ -1,0 +1,8 @@
+[Unit]
+Description=Send mail when a message is put in the spool
+
+[Path]
+PathChanged=/var/spool/fw-mail
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,5 @@
+# Files that each site must provide under site/<name>/files/ (paths relative to firewall/).
+# They hold what differs in every house (address lists, what the daily brief treats as normal), so the
+# public tree has no copy. render-site.py lays them over firewall/.
+profiles/prod/etc/dnsmasq.d/20-reservations.conf
+common/usr/local/share/fw-analysis/brief.md

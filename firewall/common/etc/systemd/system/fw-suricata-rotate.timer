@@ -1,0 +1,9 @@
+[Unit]
+Description=Rotate the Suricata event log daily
+
+[Timer]
+OnCalendar=*-*-* 00:17
+Persistent=yes
+
+[Install]
+WantedBy=timers.target

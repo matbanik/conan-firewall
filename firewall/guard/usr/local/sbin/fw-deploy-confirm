@@ -1,0 +1,9 @@
+#!/bin/sh
+# Keeps the running deploy: removes the pending marker, so fw-deploy-guard does not revert it.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+[ "$(id -u)" -eq 0 ] || exec sudo "$0" "$@"
+M=/var/lib/fw-deploy/pending
+if [ ! -f "$M" ]; then echo "nothing pending"; exit 0; fi
+rm -f "$M"
+logger -t fw-deploy "deploy confirmed by $(logname 2>/dev/null || echo root)"
+echo "confirmed"

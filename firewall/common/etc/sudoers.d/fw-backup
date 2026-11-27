@@ -1,0 +1,2 @@
+# The off-box backup key (user fwbackup, forced command) may run only the export, as root, with no password.
+fwbackup ALL=(root) NOPASSWD: /usr/local/sbin/fw-backup-export

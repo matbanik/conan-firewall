@@ -1,0 +1,6 @@
+# Onboard I219-LM (was eno2) becomes the rescue port.
+[Match]
+PermanentMACAddress=@@MGMT0_MAC@@
+
+[Link]
+Name=mgmt0

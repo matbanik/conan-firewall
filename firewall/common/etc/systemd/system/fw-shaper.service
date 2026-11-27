@@ -1,0 +1,14 @@
+[Unit]
+Description=CAKE shaper on the WAN (settings in /etc/default/fw-shaper)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/fw-shaper start
+ExecReload=/usr/local/sbin/fw-shaper start
+ExecStop=/usr/local/sbin/fw-shaper stop
+
+[Install]
+WantedBy=multi-user.target

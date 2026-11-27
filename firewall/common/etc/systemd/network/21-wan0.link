@@ -1,0 +1,6 @@
+# i350 PCI 0000:01:00.0 (was enp1s0f0)
+[Match]
+PermanentMACAddress=@@WAN0_MAC@@
+
+[Link]
+Name=wan0

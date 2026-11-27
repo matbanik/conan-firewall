@@ -1,0 +1,7 @@
+# Settings for /usr/local/sbin/fw-suricata-update (timer: fw-suricata-update.timer, daily).
+# Rule sources by suricata-update name ("suricata-update list-sources" shows all). Free sources only.
+# When any source is enabled, ET Open is no longer the default, so it must stay in this list.
+#   et/open                 Emerging Threats Open: the general rule set
+#   abuse.ch/feodotracker   botnet C2 servers (Dridex, Emotet and others)
+#   abuse.ch/urlhaus        URLs that serve malware
+SURICATA_SOURCES="et/open abuse.ch/feodotracker abuse.ch/urlhaus"

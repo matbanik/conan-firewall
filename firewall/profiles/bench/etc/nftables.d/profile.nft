@@ -1,0 +1,21 @@
+# Bench values for /etc/nftables.conf. wan0 is plugged into the ASUS LAN and gets a @@LAN_PREFIX@@.x lease,
+# so the bench LAN uses 192.168.12.0/24. trunk0 goes to a test client, never to the house switch.
+define WAN_IF = "wan0"
+define LAN_IF = "trunk0"
+define MGMT_IF = "mgmt0"
+
+define LAN_NET = 192.168.12.0/24
+define FW_ADDRS = { 192.168.12.1, 10.255.255.1 }
+
+# Unused address on the bench LAN; the remote source never reaches the bench.
+define RUSTDESK_HOST = 192.168.12.5
+define RUSTDESK_REMOTE = @@REMOTE_SRC@@
+
+table inet fw {
+	# On the bench, @@ADMIN_HOST@@ reaches the box through wan0 (the house LAN).
+	set wan_ssh_allow {
+		type ipv4_addr
+		flags interval
+		elements = { @@LAN_PREFIX@@.0/24 }
+	}
+}

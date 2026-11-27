@@ -1,0 +1,4 @@
+$TTL 300
+@ SOA localhost. root.localhost. 1 3600 600 86400 300
+  NS localhost.
+@ A 0.0.0.0

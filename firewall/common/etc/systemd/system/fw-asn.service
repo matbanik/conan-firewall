@@ -1,0 +1,31 @@
+[Unit]
+Description=Download the network-owner table (iptoasn.com)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=fwdb
+Group=adm
+UMask=0027
+ExecStart=/usr/local/sbin/fw-asn
+TimeoutStartSec=10min
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK
+ReadWritePaths=/var/lib/fwdb
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native

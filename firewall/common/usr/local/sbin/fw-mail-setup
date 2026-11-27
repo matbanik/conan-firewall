@@ -1,0 +1,21 @@
+#!/bin/sh
+# Stores the mail login as an encrypted systemd credential. Run by tools/store-mail-secret.ps1 over SSH, as root.
+# stdin: one line of JSON {"user","password","from","to"}. Nothing is printed or written in the clear.
+# The key is made from this machine's TPM chip plus a root-only file, so a copy of the disk or a backup can't open it.
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+umask 077
+[ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
+D=/etc/credstore.encrypted
+install -d -m 0700 -o root -g root "$D"
+grep -qx 'credstore.encrypted/' /etc/.gitignore 2>/dev/null || echo 'credstore.encrypted/' >>/etc/.gitignore
+key=host+tpm2
+systemd-analyze has-tpm2 --quiet || { echo "TPM not usable; not storing" >&2; exit 1; }
+systemd-creds encrypt --with-key=$key --tpm2-pcrs= --name=fw-mail - "$D/.fw-mail.new"
+systemd-creds decrypt --name=fw-mail "$D/.fw-mail.new" - |
+	python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if all(d.get(k) for k in ("user","password","from","to")) else 1)' ||
+	{ rm -f "$D/.fw-mail.new"; echo "the stored data is not complete; nothing changed" >&2; exit 1; }
+mv "$D/.fw-mail.new" "$D/fw-mail"
+chmod 600 "$D/fw-mail"
+logger -t fw-mail "mail login stored"
+echo "stored"

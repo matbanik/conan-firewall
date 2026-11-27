@@ -1,0 +1,29 @@
+# Values the scan lets through, besides the example ranges it knows (see the top of tools/scan-public.py).
+# Columns: kind <TAB> value <TAB> why.   kinds: ip, mac (lower case), email, host (a name with a DDNS suffix)
+# List a value here only when it is public by nature: a public resolver, a test value, a provider's API host.
+# Never list your own address, MAC address or name here; they belong in site/<name>/, which git ignores.
+ip	8.8.8.8	Google DNS (ASUS config being replaced)
+ip	8.8.4.4	Google DNS
+ip	1.1.1.1	Cloudflare DNS, and a self-test value in fw-blocklists
+ip	9.9.9.9	Quad9 DoT upstream
+ip	149.112.112.112	Quad9 DoT upstream
+ip	50.16.16.211	self-test value (fw-blocklists, validate.sh)
+ip	66.132.186.0	self-test value (fw-blocklists dshield)
+ip	66.132.186.255	self-test value
+ip	104.18.16.128	self-test value (fw-ingest dnsmasq reply)
+ip	1.10.16.0	self-test value
+ip	1.10.20.0	self-test value
+ip	1.2.3.0	self-test value
+ip	1.2.3.4	self-test value
+ip	1.2.3.77	self-test value
+ip	2.2.2.0	self-test value
+ip	1.0.1.0	self-test value (validate.sh geo set)
+ip	1.0.1.1	self-test value
+ip	300.1.1.1	self-test value (an invalid address on purpose)
+ip	3.0.0.6	ASUSWRT firmware version, not an address
+mac	00:00:00:00:00:00	nic-macs.sh, an unset MAC
+host	ipv4.dynv6.com	provider API host
+host	update.dedyn.io	provider API host
+host	www.duckdns.org	provider API host
+host	dynv6.com	provider site
+email	noreply@anthropic.com	commit trailer
