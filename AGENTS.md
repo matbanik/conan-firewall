@@ -6,7 +6,9 @@ and touches the hardware.
 
 ## What to do first
 
-1. Read [README.md](README.md) (what this is) and [SETUP-QUESTIONS.md](SETUP-QUESTIONS.md).
+1. Read [README.md](README.md) (what this is), [docs/features.md](docs/features.md) (what it does and its
+   limits), [docs/before-you-start.md](docs/before-you-start.md) (what the person needs) and
+   [SETUP-QUESTIONS.md](SETUP-QUESTIONS.md).
 2. Look for `site/` folders other than `site/example/`.
    - None: this is a new setup. Start the interview in SETUP-QUESTIONS.md, block A.
    - One exists: read its `site.env` and its `PROGRESS.md`, tell the person where the setup stands, and go on

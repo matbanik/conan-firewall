@@ -5,6 +5,19 @@ of this is the only right answer; it is one house's answer, kept as a worked exa
 
 ## Scope
 
+**Plain Debian, not a firewall product.** pfSense and OPNsense are good products, and they are the right
+choice when you want a web interface, VLANs and a VPN server from a menu. This repository takes the other
+road for three reasons.
+- An agent works with files and commands. Every part here has a plain config file and its own checker
+  (`nft -c`, `unbound-checkconf`, `dnsmasq --test`, `suricata -T`), so a change is tested before it is
+  installed. A product keeps its settings in one file that its web interface owns.
+- Stock Debian means the fixes come from the Debian security team through `unattended-upgrades`, and the
+  programs are the ones that run on Debian servers everywhere. What you learn here is useful on any Linux
+  machine.
+- Only what the house needs is installed. There is no web server and no settings page to protect.
+
+The cost: nothing is a click. Each feature you add is a file that you or your agent write and test.
+
 **One flat LAN.** No VLANs, no guest or IoT network. A flat network is easy to reason about and needs no
 managed-switch setup. The cost: a compromised device can reach every other device. If you need separation,
 this repository is a start and not a finish.
